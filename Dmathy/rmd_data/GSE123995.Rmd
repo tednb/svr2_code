@@ -1,0 +1,235 @@
+---
+title: "GSE123995"
+output:
+  pdf_document: default
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(include = FALSE)
+knitr::opts_knit$set(root.dir = "/mnt/local-disk/data/guoxiaolong/Renv")
+```
+
+```{r packages}
+source("~/code/Dmathy/Damthy.R")
+```
+
+```{r idat}
+library(minfi)
+rgset <- read.metharray.exp("~/data/infinium/AA_hepatocytes/idat")
+load("~/data/infinium/GPL21145/annoEPICv1B4.Rd")
+#load("~/data/infinium/AA_hepatocytes/GSE123995_mat.Rd")
+GPL <- as.data.frame(annoEPICv1B4.m)
+s <- t(fread("~/data/infinium/AA_hepatocytes/series.txt",sep = "\t",header = T))
+colnames(s)<-s[1,]
+s <- s[-1,]
+s <- s[,-c(1,2)]
+colnames(s) <- c("ancestry","sex","age","sentrix_ID","sentrix_POS")
+s <- as.data.frame(s)
+s$ancestry <- as.numeric(sapply(strsplit(s$ancestry,": "),function(x) {x[[2]]}))
+s$age <- as.numeric(sapply(strsplit(s$age,": "),function(x) {x[[2]]}))
+s$sex <- sapply(strsplit(s$sex,": "),function(x) {x[[2]]})
+s$sex <- as.numeric(ifelse(s$sex=="Male",1,0))
+s$sentrix_ID <- as.factor(sapply(strsplit(s$sentrix_ID,": "),function(x) {x[[2]]}))
+s$sentrix_POS <- as.factor(sapply(strsplit(s$sentrix_POS,": "),function(x) {x[[2]]}))
+rawDat <- f.rawD(GPL = GPL,rgset = rgset,series = s)
+# m <- read.table("~/data/infinium/AA_hepatocytes/GSE123995_series_matrix.txt",comment.char = "!",sep = "\t",header = T)
+# save(m,file = "~/data/infinium/AA_hepatocytes/GSE123995_mat.Rd")
+```
+
+```{r raw.o}
+raw.o <- f.raw.o(rawDat)
+raw.o@raw.s <- s
+coverage(raw.o) # 
+raw.o <- imp(raw.o) # 1
+raw.o@beta_dtr <- beta_dtp(raw.o)
+
+```
+
+```{r server 3}
+# GRset =makeGenomicRatioSetFromMatrix(m)
+# annotation <- getAnnotation(GRset)
+# sex_probe <- rownames(annotation)[annotation$chr %in% c("chrX","chrY")]
+# keep <- !(featureNames(GRset) %in% sex_probe)
+# GRset <- GRset[keep,]
+# GRset <- dropLociWithSnps(GRset,snps = c("CpG", "SBE"))
+# m <- getBeta(GRset)
+# save(m,file = "test.Rd")
+```
+
+raw.o
+
+```{r}
+# load("test.Rd")
+# raw.o <- new("raw.o")
+# raw.o@raw.m <- m
+# raw.o@raw.s <- as.data.frame(s)
+# raw.o@raw.g <- g
+
+```
+
+qc.o
+
+```{r}
+qc.o <- f.qc.o(raw.o)
+qc.o@ctf.o <- CTF(qc.o,mrefLiver.m)
+idx <- grep("GSM3518380",colnames(qc.o@m))
+qc.o@m <- qc.o@m[,-idx]
+qc.o@s <- qc.o@s[-idx,]
+qc.o@ctf.o <- CTF(qc.o,mrefLiver.m)
+qc.o@svd.o <- lm_svd(qc.o)
+p_h(qc.o,pic = c(27,5))
+```
+
+Validation
+
+```{r}
+load("~/data/infinium/liver_sample/341_liver_samples/RData/dmct_hc.Rd")
+
+hyper_h <- rownames(dmct_hc)[dmct_hc$Hep == 1]
+hypo_h <- rownames(dmct_hc)[dmct_hc$Hep == -1]
+
+idx_hyper <- match(hyper_h,rownames(qc.o@m))
+idx_hyper <- idx_hyper[complete.cases(idx_hyper)]
+idx_hypo <- match(hypo_h,rownames(qc.o@m))
+idx_hypo <- idx_hypo[complete.cases(idx_hypo)]
+
+m_hyper <- qc.o@m[idx_hyper,]
+m_hypo <- qc.o@m[idx_hypo,]
+
+mean_hyper <- apply(m_hyper,2,mean)
+mean_hypo <- apply(m_hypo,2,mean)
+```
+
+Negative control
+
+```{r}
+hyper_ch <- rownames(dmct_hc)[dmct_hc$Chol == 1]
+hypo_ch <- rownames(dmct_hc)[dmct_hc$Chol == -1]
+
+idx_hyper <- match(hyper_ch,rownames(qc.o@m))
+idx_hyper <- idx_hyper[complete.cases(idx_hyper)]
+idx_hypo <- match(hypo_ch,rownames(qc.o@m))
+idx_hypo <- idx_hypo[complete.cases(idx_hypo)]
+
+mc_hyper <- qc.o@m[idx_hyper,]
+mc_hypo <- qc.o@m[idx_hypo,]
+
+meanc_hyper <- apply(mc_hyper,2,mean)
+meanc_hypo <- apply(mc_hypo,2,mean)
+```
+
+```{r plot}
+# hyper
+library(ggplot2)
+library(cowplot)
+pdf("vali_hyper_hypo.pdf",width = 20,height = 5)
+r <- cor(qc.o@s$age,mean_hyper, method = "pearson")
+p_value <- cor.test(qc.o@s$age,mean_hyper)$p.value
+
+rc <- cor(qc.o@s$age,meanc_hyper, method = "pearson")
+pc_value <- cor.test(qc.o@s$age,meanc_hyper)$p.value
+
+p1<-ggplot(qc.o@s, aes(x = age, y = mean_hyper)) +
+  geom_point(col = "blue",size = 3) +
+  xlab("Age: years") + 
+  ylab("Mean beta") + 
+  ggtitle(paste0("Hep hyper age-DMCs","\n","PCC = ", format(r, digits = 2), " p = ", format(p_value, digits = 1))) +
+  theme_bw()+
+  theme(axis.text=element_text(size=17,face="bold"),
+        axis.title=element_text(size=20),
+        title=element_text(size=20),
+        legend.position="none",plot.title = element_text(hjust = 0.5))+
+    geom_smooth(method = "lm", se = FALSE, color = "blue", size = 1.5, linetype = "dashed")+
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+  
+# Negative control
+p2<-ggplot(qc.o@s, aes(x = age, y = meanc_hyper)) +
+  geom_point(col = "green",size = 3) +
+  xlab("Age: years") +
+  ylab(NULL) +
+  ggtitle(paste0("Chol hyper age-DMCs","\n","PCC = ", format(r, digits = 2), " p = ", format(p_value, digits = 1))) +
+  theme_bw()+
+  theme(axis.text=element_text(size=17,face="bold"),
+        axis.title=element_text(size=20),
+        title=element_text(size=20),
+        legend.position="none",plot.title = element_text(hjust = 0.5))+
+    geom_smooth(method = "lm", se = FALSE, color = "green", size = 1.5, linetype = "dashed")+
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+# hypo
+r <- cor(qc.o@s$age,mean_hypo, method = "pearson")
+p_value <- cor.test(qc.o@s$age,mean_hypo)$p.value
+
+rc <- cor(qc.o@s$age,meanc_hypo, method = "pearson")
+pc_value <- cor.test(qc.o@s$age,meanc_hypo)$p.value
+
+# plot for hepatocytes
+p3<-ggplot(qc.o@s, aes(x = age, y = mean_hypo)) +
+  geom_point(col = "blue",size = 3) +
+  xlab("Age: years") +
+  ylab(NULL) +
+  ggtitle(paste0("Hep hypo age-DMCs","\n","PCC = ", format(r, digits = 2), " p = ", format(p_value, digits = 1))) +
+  theme_bw()+
+  theme(axis.text=element_text(size=17,face="bold"),
+        axis.title=element_text(size=20),
+        title=element_text(size=20),
+        legend.position="none",plot.title = element_text(hjust = 0.5))+
+    geom_smooth(method = "lm", se = FALSE, color = "blue", size = 1.5, linetype = "dashed")+
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+# plot for cholangiocytes (negative control)
+p4<-ggplot(qc.o@s, aes(x = age, y = meanc_hypo)) +
+  geom_point(col = "green",size = 3) +
+  xlab("Age: years") +
+  ylab(NULL) +
+  ggtitle(paste0("Chol hypo age-DMCs","\n","PCC = ", format(r, digits = 2), " p = ", format(p_value, digits = 1))) +
+theme_bw()+
+  theme(axis.text=element_text(size=17,face="bold"),
+        axis.title=element_text(size=20),
+        title=element_text(size=20),
+        legend.position="none",plot.title = element_text(hjust = 0.5))+
+    geom_smooth(method = "lm", se = FALSE, color = "green", size = 1.5, linetype = "dashed")+
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+p_1 <- plot_grid(p1,p2,p3,p4,ncol = 4,nrow = 1,rel_widths = c(1.1,1,1,1),align = "h")
+p_1
+dev.off()
+```
+
+```{r}
+p_12 <- plot_grid(p_2,p_1,nrow = 2,align = "v", labels =c("","e)"),rel_widths = c(1.3,1),label_size = 12)
+pdf("test.pdf",height = 10,width = 23)
+p_12
+dev.off()
+```
+
+```{r}
+p_fig1 <- plot_grid(p_12,p_vali,nrow = 2,align = "v",labels =c("","f)"),label_size = 12)
+pdf("fg1.pdf",height = 25,width = 25)
+p_fig1
+dev.off()
+```
+
+Clock
+
+```{r}
+pdf("chol_hyper_pos.pdf",width = 5,height = 5)
+r <- cor(qc.o@s$age,meanc_pos, method = "pearson")
+p_value <- cor.test(qc.o@s$age,meanc_pos)$p.value
+
+
+p1<-ggplot(qc.o@s, aes(x = age, y = meanc_pos)) +
+# 大号紫色三角形点
+  geom_point(pch = 17, col = "orange",size = 4) +
+  xlab("Age: years") + 
+  ylab("Mean beta") + 
+  ggtitle(paste0("Chol-hyper age-DMCs in Chol clock","\n","PCC = ", format(r, digits = 2), " p = ", format(p_value, digits = 1))) +
+  theme_bw()+
+  theme(axis.text=element_text(size=17,face="bold"),
+        axis.title=element_text(size=20),
+        title=element_text(size=20),
+        legend.position="none",plot.title = element_text(hjust = 0.5))
+p1
+dev.off()
+```

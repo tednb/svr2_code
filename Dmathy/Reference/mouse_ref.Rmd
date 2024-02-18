@@ -1,0 +1,383 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# 1. Build human ref
+
+```{r package and data}
+library(limma)
+library(dplyr)
+library(minfi)
+load("~/data/WGBS/Loyfer_et_al/ref.Rd")
+# load("~/data/WGBS/Loyfer_et_al/DNAmAtlasPheno.rda")
+# load("~/data/WGBS/Loyfer_et_al/WGBSavbetaCOV10.rda")
+```
+
+```{r limma}
+# limma
+idx <- which(lv$Tissue != "Liver" & lv$CT %in% c("Endothelium"))
+lv <- lv[-idx,]
+ref.m <- ref.m[,-idx]
+cellType <- lv$CT
+cellType <- factor(cellType)
+# use the above to create a design matrix
+hypo <- function(fit){
+  marker <- list()
+  DMPs <- topTable(fit, num = Inf, coef = 1, sort.by = "p")
+  DMPs_hypo <- DMPs[which(DMPs$t < 0 & DMPs$adj.P.Val <= 0.05),]
+  markers <- rownames(DMPs_hypo)
+  print(length(markers))
+  return(markers)
+}
+hypo_c <- list()
+# compare one cell type with another three cell types together
+for (i in seq_along(levels(cellType))){
+  med <- as.character(cellType)
+  other<-setdiff(levels(cellType), levels(cellType)[i])
+  med[med %in% other] <- "other"
+  med <- factor(med)
+  design <- model.matrix(~0+med)
+  colnames(design) <- levels(med)
+  # fit the linear model
+  fit <- lmFit(ref.m, design)
+  # create a contrast matrix for specific comparisons
+  contrast_formula <- paste(levels(cellType)[i], "- other", sep="")
+  contMatrix <- makeContrasts(contrast_formula, levels = design)
+  # fit the contrasts
+  fit2 <- contrasts.fit(fit, contMatrix)
+  fit2 <- eBayes(fit2)
+  # look at the numbers of DM CpGs at FDR < 0.05
+  print(summary(decideTests(fit2)))
+  # filter hypoM
+  hypo_c[[i]] <- hypo(fit2)
+}
+
+```
+
+```{r}
+# limma
+cellType <- lv$CT
+cellType <- factor(cellType)
+# use the above to create a design matrix
+hypo <- function(fit){
+  marker <- list()
+  DMPs <- topTable(fit, num = Inf, coef = 1, sort.by = "p")
+  DMPs_hypo <- DMPs[which(DMPs$t < 0 & DMPs$adj.P.Val <= 0.05),]
+  markers <- rownames(DMPs_hypo)
+  print(length(markers))
+  return(markers)
+}
+hyper <- function(fit){
+  marker <- list()
+  DMPs <- topTable(fit, num = Inf, coef = 1, sort.by = "p")
+  DMPs_hypo <- DMPs[which(DMPs$t > 0 & DMPs$adj.P.Val <= 0.05),]
+  markers <- rownames(DMPs_hypo)
+  print(length(markers))
+  return(markers)
+}
+hypo_c <- list()
+# compare one cell type with another three cell types together
+
+  med <- as.character(cellType)
+  other<-setdiff(levels(cellType), "Hepatocyte")
+  med[med %in% other] <- "other"
+  med <- factor(med)
+  design <- model.matrix(~0+med)
+  colnames(design) <- levels(med)
+  # fit the linear model
+  fit <- lmFit(ref.m, design)
+  # create a contrast matrix for specific comparisons
+  contrast_formula <- paste("Hepatocyte ", "- other", sep="")
+  contMatrix <- makeContrasts(contrast_formula, levels = design)
+  # fit the contrasts
+  fit2 <- contrasts.fit(fit, contMatrix)
+  fit2 <- eBayes(fit2)
+  # look at the numbers of DM CpGs at FDR < 0.05
+  print(summary(decideTests(fit2)))
+  # filter hypoM
+  hypo_c[["hepatocyte"]] <- hypo(fit2)
+  hypo_c[["other"]] <- hyper(fit2)
+```
+
+```{r S1}
+by_diff_max <- function(mark,ref.m,CT,cell,THRE){
+  m <- ref.m[mark,]
+  idx_cell <- which(CT == cell)
+  idx_other <- setdiff(1:length(CT),idx_cell)
+  g_diff.c <- apply(m,1,function(x) {min(x[idx_other])-max(x[idx_cell])}) # rank
+  idx_diff <- which(g_diff.c >= THRE)
+  g_diff.c <- g_diff.c[idx_diff]
+  mark <- mark[idx_diff]
+  names(g_diff.c) <- 1:length(g_diff.c)
+  result<-sort(g_diff.c, decreasing = TRUE)
+  idx <- as.numeric(names(result))
+  print(length(idx))
+  return(mark[idx])
+}
+hep_DMC<-by_diff_max(hypo_c[["hepatocyte"]],ref.m,med,"Hepatocyte",THRE = 0.1)
+rest_DMC<-by_diff_max(hypo_c[["other"]],ref.m,med,"other",THRE = 0.1)
+hep_DMC <- hep_DMC[1:494] #232
+rest_DMC <- rest_DMC[1:494] #232
+```
+
+```{r Top 35 markers}
+hep_DMC<-by_diff_max(hypo_c[[2]],ref.m,lv$CT,"Hepatocyte",THRE = 0.15)
+lym_DMC<-by_diff_max(hypo_c[[3]],ref.m,lv$CT,"Lymphocyte",THRE = 0.15)
+mac_DMC <- by_diff_max(hypo_c[[4]],ref.m,lv$CT,"Macrophages",THRE = 0.15)
+endo_DMC <- by_diff_max(hypo_c[[1]],ref.m,lv$CT,"Endothelium",THRE = 0.15)
+#save(hep_DMC,lym_DMC,mac_DMC,endo_DMC,file = "makers_all.Rd")
+hep_DMC <- hep_DMC[1:38]
+lym_DMC <- lym_DMC[1:38]
+mac_DMC <- mac_DMC[1:38]
+endo_DMC <- endo_DMC[1:38]
+
+```
+
+```{r}
+pdf("hep_S2.pdf",width = 9.5,height = 7)
+par(mfrow=c(2,2))
+sapply(hep_DMC [c(1,2,length(hep_DMC )-1,length(hep_DMC))], function(cpg){
+  plotCpg(ref.m, cpg=cpg, pheno=med, ylab = "methylation fraction")
+})
+dev.off()
+pdf("rest_S2.pdf",width = 9.5,height = 7)
+par(mfrow=c(2,2))
+sapply(rest_DMC [c(1,2,length(rest_DMC)-1,length(rest_DMC))], function(cpg){
+  plotCpg(ref.m, cpg=cpg, pheno=med, ylab = "methylation fraction")
+})
+dev.off()
+```
+
+```{r}
+mars <- as.character(unique(c(hep_DMC,rest_DMC)))
+mars <- intersect(rownames(ref.m),mars)
+ref <- ref.m[mars,] # 140
+ref.mx <- matrix(data = NA,nrow = length(mars),ncol = 2)
+rownames(ref.mx) <- mars
+colnames(ref.mx) <- levels(med)
+for ( i in levels(med)){
+  idx <- which(med == i)
+  if (length(idx) > 1){
+  med.c<-apply(ref[,idx],1,median)}
+  else {
+  med.c<-ref[,idx]
+  }
+  ref.mx[,i] <- med.c
+}
+weight <- rep(NA,times = nrow(ref.mx))
+ref_liver <- cbind(ref.mx,weight)
+
+```
+
+```{r combine and take median}
+mars <- as.character(unique(c(hep_DMC,lym_DMC,mac_DMC,endo_DMC)))
+mars <- intersect(rownames(ref.m),mars)
+ref <- ref.m[mars,] # 140
+ref.mx <- matrix(data = NA,nrow = length(mars),ncol = 4)
+rownames(ref.mx) <- mars
+colnames(ref.mx) <- levels(factor(lv$CT))
+for ( i in levels(factor(lv$CT))){
+  idx <- which(lv$CT == i)
+  if (length(idx) > 1){
+  med.c<-apply(ref[,idx],1,median)}
+  else {
+  med.c<-ref[,idx]
+  }
+  ref.mx[,i] <- med.c
+}
+weight <- rep(NA,times = nrow(ref.mx))
+ref.mx <- cbind(ref.mx,weight)
+ref_liver <- ref.mx
+```
+
+```{r}
+pdf("hep_S2.pdf",width = 9.5,height = 7)
+par(mfrow=c(2,2))
+sapply(hep_DMC [c(1,2,length(hep_DMC )-1,length(hep_DMC))], function(cpg){
+  plotCpg(ref.m, cpg=cpg, pheno=lv$CT, ylab = "methylation fraction")
+})
+dev.off()
+pdf("lym_S2.pdf",width = 9.5,height = 7)
+par(mfrow=c(2,2))
+sapply(lym_DMC [c(1,2,length(lym_DMC )-1,length(lym_DMC))], function(cpg){
+  plotCpg(ref.m, cpg=cpg, pheno=lv$CT, ylab = "methylation fraction")
+})
+dev.off()
+pdf("mac_S2.pdf",width = 9.5,height = 7)
+par(mfrow=c(2,2))
+sapply(mac_DMC [c(1,2,length(mac_DMC )-1,length(mac_DMC))], function(cpg){
+  plotCpg(ref.m, cpg=cpg, pheno=lv$CT, ylab = "methylation fraction")
+})
+dev.off()
+pdf("endo_S2.pdf",width = 9.5,height = 7)
+par(mfrow=c(2,2))
+sapply(endo_DMC [c(1,2,length(endo_DMC )-1,length(endo_DMC))], function(cpg){
+  plotCpg(ref.m, cpg=cpg, pheno=lv$CT, ylab = "methylation fraction")
+})
+dev.off()
+```
+
+```{r test}
+#load("~/data/infinium/liver_sample/AA_hepatocytes/GSE123995_qc.Rd")
+hep.m <- qc.o@m
+avSIM.m <- constAvBetaTSS(hep.m, type="850k")
+estF.o <- wRPC(avSIM.m, ref=ref_liver, useW=FALSE, maxit=500)
+pdf("hep.pdf",width = 6, height = 4)
+fplot <- boxplot(estF.o$estF, main = "Estimation of hepatocyte fractions ", xlab = "Cell types", ylab = "Fraction")
+dev.off()
+# purified blood
+# monocyte
+library(EpiSCORE)
+#load("~/data/infinium/purified_blood/GSE56056/GSE56046_he.Rd")
+mono.m <- mono_he.o@m
+avSIM.m <- constAvBetaTSS(mono.m, type="450k")
+estF.o <- wRPC(avSIM.m, ref=ref_liver, useW=FALSE, maxit=500)
+pdf("mono.pdf",width = 6, height = 4)
+fplot <- boxplot(estF.o$estF, main = "Estimation of mono fractions ", xlab = "Cell types", ylab = "Fraction")
+dev.off()
+#CD4T
+#load("~/data/infinium/purified_blood/GSE56581/ReynoldsCD4T_he.Rd")
+cd4t.m <- CD4T_qc.o@m
+avSIM.m <- constAvBetaTSS(cd4t.m, type="450k")
+estF.o <- wRPC(avSIM.m, ref=ref_liver, useW=FALSE, maxit=500)
+pdf("cd4t.pdf",width = 6, height = 4)
+fplot <- boxplot(estF.o$estF, main = "Estimation of cd4t fractions ", xlab = "Cell types", ylab = "Fraction")
+dev.off()
+#Endo * 10 loyfer_et_al
+idx <- which(dnampheno.df$Tissue %in% c("Vascular saphenous","Kidney glomerular","Pancreas")& dnampheno.df$CT == "Endothelium")
+endo.m <- avbeta.m[,idx]
+estF.o <- wRPC(endo.m, ref=ref_liver, useW=FALSE, maxit=500)
+pdf("endo.pdf",width = 6, height = 4)
+fplot <- boxplot(estF.o$estF, main = "Estimation of endo fractions ", xlab = "Cell types", ylab = "Fraction")
+dev.off()
+#liver
+#load("~/data/infinium/liver_sample/341_liver_samples/RData/GSE180474_he.Rd")
+liver.m <- he.o@m
+avSIM.m <- constAvBetaTSS(liver.m, type="850k")
+estF.o <- wRPC(avSIM.m, ref=ref_liver, useW=FALSE, maxit=500)
+pdf("liver.pdf",width = 6, height = 4)
+fplot <- boxplot(estF.o$estF, main = "Estimation of liver fractions ", xlab = "Cell types", ylab = "Fraction")
+dev.off()
+```
+
+```{r}
+load("~/data/infinium/liver_sample/AA_hepatocytes/GSE123995_qc.Rd")
+load("~/data/infinium/liver_sample/40_normal_liver_samples/GSE107038_qc.Rd")
+load("~/data/infinium/purified_blood/GSE56056/GSE56046_he.Rd")
+load("~/data/infinium/purified_blood/GSE56581/ReynoldsCD4T_he.Rd")
+load("~/data/infinium/liver_sample/341_liver_samples/RData/GSE180474_he.Rd")
+hep.m <- qc.o@m
+mono.m <- mono_he.o@m
+cd4t.m <- CD4T_qc.o@m
+liver.m <- he.o@m
+library(MASS)
+RPC_array <- function(ref.m,data.m,cell){
+  library(EpiSCORE)
+  data.m <- constAvBetaTSS(data.m, type="850k")
+  common.v <- intersect(rownames(ref.m),rownames(data.m))
+map.idx <- match(common.v,rownames(data.m))
+rep.idx <- match(common.v,rownames(ref.m))
+data.m <- data.m[map.idx,] # 61 * 98
+ref.m <- ref.m[rep.idx,-ncol(ref.m)]
+  est.m <- matrix(data = NA,nrow=ncol(data.m),ncol=ncol(ref.m)) 
+  colnames(est.m) <- colnames(ref.m)
+  rownames(est.m) <- colnames(data.m)
+sum_squared_residuals_liver <- vector("numeric", ncol(data.m))
+for (s in 1:ncol(data.m)) {
+  rlm.o <- rlm(data.m[, s] ~ ref.m, maxit = 500)
+  coef.v <- summary(rlm.o)$coef[2:(ncol(ref.m)+1),1];
+  # coef.v[which(coef.v<0)] <- 0;
+  # total <- sum(coef.v);
+  # coef.v <- coef.v/total;
+  est.m[s,] <- coef.v;
+  residuals <- rlm.o$residuals
+  sum_squared_residuals_liver[s] <- sum(residuals^2)  # 平均平方残差
+}
+# pdf(paste0(cell,".pdf"),width = 6, height = 4)
+# boxplot(est.m, main = paste0("Estimation of fractions for ",cell), xlab = "Cell types", ylab = "Fraction")
+# dev.off()
+# mean(sum_squared_residuals_liver)
+est.m
+}
+# no normalization
+RPC_array(ref_liver,hep.m,"hepatocyte") # 5.78
+RPC_array(ref_liver,mono.m,"monocyte") # 6.2
+RPC_array(ref_liver,cd4t.m,"CD4T") # 5.9
+RPC_array(ref_liver,liver.m,"liver") # 3.76
+```
+
+```{r}
+load("~/data/infinium/liver_sample/79_livers(25_healthy)/GSE61258/GSE61258_qc.Rd")
+comp.m <- qc.o@m
+est <- RPC_array(ref_liver,comp.m,"liver")
+est <- as.data.frame(est)
+est$disease<-qc.o@s$disease
+est$other <- NULL
+library(ggplot2)
+pdf("hep_f_disease.pdf",width = 5,height = 5)
+ggplot(data = est, aes(x = est$disease, y = est$Hepatocyte))+geom_boxplot() +
+  labs(title = "The fraction of hepatocyte in liver (GSE61258, n = 79)", y = "Fraction") +
+  scale_x_discrete(labels = c("Healthy (n=26)", "HealthyObese (n = 6)", "NAFLD (n = 14)", "PBC (n = 12)", "PSC (n = 14)", "NASH (n = 7)"))+
+  theme(axis.title.x = element_blank())+
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+dev.off()
+
+```
+
+```{r}
+load("~/data/infinium/liver_sample/341_liver_samples/RData/GSE180474_qc.Rd")
+stage.m <- qc.o@m
+est <- RPC_array(ref_liver,stage.m,"liver")
+est <- as.data.frame(est)
+est$disease<-qc.o@s$desease
+est$other <- NULL
+pdf("hep_f_nafld.pdf",width = 7,height = 5)
+ggplot(data = est, aes(x = factor(est$disease), y = est$Hepatocyte))+geom_boxplot() +
+  labs(title = "The fraction of hepatocyte in liver (GSE180474, n = 325)", y = "Fraction") +
+  scale_x_discrete(labels = c("HealthyObese (n = 210)", "Grade 3 (n = 55)", "Grade 3/4 (n = 36)", "Grade 4 (n = 24)"))+
+  theme(axis.title.x = element_blank())+
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+dev.off()
+```
+
+```{r over}
+save(ref_liver,file = "human_ref.Rd")
+```
+
+# 2. Build mouse ref
+
+```{r}
+library(homologene)
+load("~/data/infinium/MM285/Rdata/normal_solid/map_DB.Rd")
+#1# transform ref
+
+h_gene <- rownames(ref_liver)
+h_m <- homologene(h_gene,inTax = 9606, outTax = 10090)
+idx <- match(h_gene,h_m$`9606_ID`)
+h_ID <- h_m$`9606_ID`[idx]
+m_name <- h_m$`10090`[idx]
+
+#length(intersect(hep_DMC,h_ID))
+
+# replace
+idx <- which(!is.na(m_name))
+mice_ref <- ref_liver[idx,]
+rownames(mice_ref) <- na.omit(m_name)
+
+
+# check quality
+common.gene <- intersect(rownames(mice_ref),rownames(map_gene.m)) #60
+idx <- match(common.gene,h_m$`10090`)
+h_name <- h_m$`9606_ID`[idx]
+
+length(intersect(hep_DMC,h_name))#33
+length(intersect(rest_DMC,h_name))#35
+
+```
+
+```{r}
+save(mice_ref,file = "mouse_ref.Rd") # 298 * 3
+
+```

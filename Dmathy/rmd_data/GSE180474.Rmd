@@ -1,0 +1,369 @@
+---
+title: "GSE180474"
+output:
+  pdf_document: default
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(include = FALSE)
+knitr::opts_knit$set(root.dir = "/mnt/local-disk/data/guoxiaolong/Renv")
+```
+
+```{r packages}
+source("~/code/Dmathy/code/Damthy.R")
+```
+
+```{r data}
+load("~/data/infinium/GPL_files/GPL21145/annoEPICv1B4.Rd")
+load("~/data/eGTEX/GSE180474/RData/GSE180474_MatrixProcessed.csv")
+GPL <- as.data.frame(annoEPICv1B4.m)
+m_pval <- 
+```
+
+1.  preprocess
+
+```{r tidy features}
+# tidy features
+age <- as.numeric(rawData@series$`age:ch1`)
+sex <- rawData@series$`Sex:ch1` %>% gsub("Male", 1, .) %>% gsub("Female", 0, .) %>% as.numeric()
+desease <- rawData@series$`disease state:ch1` %>% gsub("Grade0", 0,.) %>%
+    gsub("Grade3\\b", 1,.) %>% gsub("Grade34", 2,.) %>% gsub("Grade4", 3,.) %>% as.numeric()
+SentrixID <- factor(rawData@series$`chip id:ch1`)
+SentrixPos <- factor(unlist(lapply(rawData@series$description.2, function(x) {strsplit(x,"_")[[1]][2]})))
+bmi <- as.numeric(rawData@series$`bmi:ch1`)
+t2d <- rawData@series$`t2d medication:ch1` %>% gsub("Yes", 1, .) %>% gsub("No", 0, .) %>% as.numeric()
+raw.o@raw.s <- data.frame(age, sex, desease, SentrixID, SentrixPos, bmi, t2d)
+coverage(raw.o)
+```
+
+```{r bmiq+dups+svd}
+qc.o <- f.qc.o(raw.o)
+qc.o@beta_dtr[[1]]
+qc.o@ctf.o <- CTF(qc.o,mrefLiver.m)
+qc.o@svd.o <- lm_svd(qc.o)
+p_h(qc.o)
+```
+
+```{r healthy+svd}
+he.o <- f.he.o(qc.o)
+he.o@ctf.o <- CTF(he.o,mrefLiver.m)
+he.o@svd.o <- lm_svd(he.o)
+p_h(he.o)
+```
+
+2.  CTF \~ age：cholangiocyte, hepatocyte, epithelial cells, kupffer cells, lymphocyte.
+
+```{r}
+s <- ncol(he.o@ctf.o[[1]])
+pdf("age-ctf.pdf", width=11,height=6)
+par(mfcol=c(2,3),mar=c(4,4,4,4))
+for (i in 1:s){
+  r <- cor(he.o@s$age, he.o@ctf.o[[1]][,i], method = "pearson")
+    p_value <- cor.test(he.o@s$age, he.o@ctf.o[[1]][,i])$p.value
+    plot(he.o@s$age,he.o@ctf.o[[1]][,i], xlab = "age", ylab = colnames(he.o@ctf.o[[1]])[i], pch = 16, col = "black", cex = 0.5)
+    fit <- lm(he.o@ctf.o[[1]][,i] ~ he.o@s$age)
+    abline(fit, col = "red")
+    text(x = min(he.o@s$age)+0.2*min(he.o@s$age), y = max(he.o@ctf.o[[1]][,i]),labels = paste0("r=",format(r, digits = 3)),cex = 0.8)
+    text(x = min(he.o@s$age)+0.2*min(he.o@s$age), y = max(he.o@ctf.o[[1]][,i]) - 0.1*(max(he.o@ctf.o[[1]][,i]) - min(he.o@ctf.o[[1]][,i])),cex = 0.8, labels = paste0("p=",format.pval(p_value,digits = 3)))
+}
+dev.off()
+
+```
+
+3.  beta \~ CTF + age + sex + t2d
+
+```{r}
+library(qvalue)
+library(broom)
+library(pbapply)
+library(parallel)
+library(ggplot2)
+library(VennDiagram)
+load("~/data/infinium/liver_sample/341_liver_samples/RData/GSE180474_he.Rd")
+m <- t(he.o@m)
+s <- cbind(he.o@s, he.o@ctf.o[[1]])
+pri_LR <- lm(m~age + Chol + EC + Hep + Kup + Lym + sex + t2d, data = s) #aj ctf
+nc_LR <- lm(m~age + sex + t2d, data = s) # n aj ctf
+sum_LR <- summary(pri_LR)
+sum_ncLR <- summary(nc_LR)
+age_p <- unlist(mclapply(sum_LR, function(x) tidy(x)[[5]][2], mc.cores = 100))
+age_np <- unlist(mclapply(sum_ncLR, function(x) tidy(x)[[5]][2], mc.cores = 100))
+
+
+age_t <- unlist(mclapply(sum_LR, function(x) tidy(x)[[4]][2], mc.cores = 100))
+names(age_p) <- pbsapply(strsplit(names(age_p)," "), function(x) x[2])
+names(age_np) <- pbsapply(strsplit(names(age_np)," "), function(x) x[2])
+names(age_t) <- pbsapply(strsplit(names(age_t)," "), function(x) x[2])
+adj_np <- qvalue(age_np, fdr.level = 0.05)
+adj_p <- qvalue(age_p, fdr.level = 0.05)
+sum(adj_p$significant) #aj ctf 242415
+sum(adj_np$significant)#n aj ctf 224285
+
+# 维恩图
+cpg <- names(age_p)[adj_p$significant]
+n_cpg <- names(age_np)[adj_np$significant]
+ 
+venn.diagram(x=list(cpg,n_cpg),
+             scaled = F, # 根据比例显示大小
+             alpha= 0.7, #透明度
+             lwd=1,lty=1,col=c('#FFFFCC','#CCFFFF'), #圆圈线条粗细、形状、颜色；1 实线, 2 虚线, blank无线条
+             label.col ='black' , # 数字颜色abel.col=c('#FFFFCC','#CCFFFF',......)根据不同颜色显示数值颜色
+             cex = 2, # 数字大小
+             fontface = "bold",  # 字体粗细；加粗bold
+             fill=c('#FFFFCC','#CCFFFF'), # 填充色 配色https://www.58pic.com/
+             category.names = c("adj CTFs", "no CTFs") , #标签名
+             cat.dist = 0.02, # 标签距离圆圈的远近
+             cat.pos = -180, # 标签相对于圆圈的角度cat.pos = c(-10, 10, 135)
+             cat.cex = 2, #标签字体大小
+             cat.fontface = "bold",  # 标签字体加粗
+             cat.col='black' ,   #cat.col=c('#FFFFCC','#CCFFFF',.....)根据相应颜色改变标签颜色
+             cat.default.pos = "outer",  # 标签位置, outer内;text 外
+             output=TRUE,
+             filename='cpg_venn.png',# 文件保存
+             imagetype="png",  # 类型（tiff png svg）
+             resolution = 400,  # 分辨率
+             compression = "lzw"# 压缩算法
+             )
+
+#观察P值分布
+h <- hist(age_p,breaks = 20,col = "skyblue",main = "Histogram of P values",xlab = "p values", ylab = "counts")
+bcounts <- h$counts
+bcenters <- h$mids
+# 绘制连接每个柱子中心点的线
+lines(bcenters, bcounts, col = "red", lwd = 2)
+# FDR
+
+sum(adj_p$significant) # 242415
+#sum(adj_p$qvalues <= 0.3) # 595833
+```
+
+3.  Validation
+
+```{r}
+library(grid)
+# Excluding age to regress
+sec_LR <- lm(m~Chol + EC + Hep + Kup + Lym + sex + t2d, data = s)
+qv <- sort(adj_p$qvalues)
+top_q <- qv[1:10]
+top_t <- age_t[names(top)]
+beta_top <- he.o@m[match(names(top),rownames(he.o@m)),]
+#DNAm vs chronological age
+pdf("m~age.pdf", width=6,height=6)
+par(mfrow=c(2,2),mar=c(4,4,4,4))
+for (i in 1:nrow(beta_top)) {
+  plot(s$age,beta_top[i,],ylab = "beta",xlab = "Age",main = rownames(beta_top)[i])
+      text(y = max(beta_top[i,]), x = min(s$age)+8,labels = paste0("P = ",format(top_q[i], digits = 1)),cex = 0.8)
+      text(y = max(beta_top[i,])-0.03, x = min(s$age)+8,labels = paste0("t-stat = ",format(top_t[i], digits = 2)),cex = 0.8)
+
+}
+grid.text("'P and t comes from the age coefficient in 'lm(m~age + Chol + EC + Hep + Kup + Lym + sex + t2d)'",x=0.5, y=0.4, gp=gpar(fontsize=10))
+dev.off()
+#Residuals vs age
+top_re <- t(as.data.frame(sec_LR$residuals))[match(names(top),rownames(he.o@m)),]
+pdf("Re~age.pdf", width=6,height=6)
+par(mfrow=c(2,2),mar=c(4,4,4,4))
+for (i in 1:nrow(top_re)) {
+  r <- cor(s$age,top_re[i,], method = "pearson")
+  print(r)
+  plot(s$age,top_re[i,],ylab = "Residuals",xlab = "Age",main = rownames(top_re)[i])
+      text(y = max(top_re[i,])-0.01, x = min(s$age)+8,labels = paste0("r=",format(r, digits = 1)),cex = 0.6)
+}
+grid.text("'r comes from 'cor(Residuals,age)'",x=0.5, y=0.4, gp=gpar(fontsize=10))
+dev.off()
+```
+
+4.  CellDMC
+
+```{r}
+# # young middle and old
+# ageORD.v <- s$age
+# ageORD.v[s$age<=40] <- 0
+# ageORD.v[s$age>40 & s$age <=60] <- 1
+# ageORD.v[s$age > 60] <- 2
+
+library(EpiDISH)
+covs <- model.matrix(~ sex + t2d, data = he.o@s)
+celldmc.o <- CellDMC(he.o@m, he.o@s$age ,he.o@ctf.o[[1]], 
+                     cov.mod = covs, 
+                     adjPMethod = "fdr",
+                     adjPThresh = 0.05,
+                     sort = FALSE,
+                     mc.cores = 100)
+dmcts<- celldmc.o$dmct
+
+```
+
+```{r}
+# Draw barplot for dmcts
+require(ggplot2)
+require(tidyr)
+dmcts <- as.data.frame(dmcts)
+dmct_hc <- dmcts[dmcts$DMC==1,]
+dmct_hc <- dmct_hc[,-1]
+df_long <- gather(dmct_hc, key = "Cell_Type", value = "Value")
+require(dplyr)
+df_counts <- df_long %>% group_by(Cell_Type, Value) %>% summarise(Counts = sum(Value == 1 | Value == -1))
+df_counts <- df_counts[-c(2,5,8,10,12),]
+kup <- t(data.frame(c("Kup",-1,0),c("Kup",1,0)))
+rownames(kup) <- c(9,10)
+colnames(kup) <- c("Cell_Type","Value","Counts")
+kup <- as.data.frame(kup)
+kup$Value <- as.numeric(kup$Value)
+kup$Counts <- as.integer(kup$Counts)
+df_counts <- rbind(df_counts,kup)
+# 绘制柱状图
+pdf(file = "bar_adcs.pdf",width = 6,height = 4)
+p_bar <- ggplot(df_counts, aes(x = Cell_Type, y = Counts, fill = factor(Value))) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  geom_text(aes(label = Counts, y = Counts + 0.5*sign(Counts),
+                group = Value), position = position_dodge(width = 0.9)) +
+  labs(x = "Cell Types", y = "Count")+
+  scale_fill_discrete(labels=c("hypo","hyper")) +
+  theme(legend.title=element_blank())+
+   ggtitle("CellDMC prediction")+  
+  theme(panel.background = element_rect(fill = "white", colour = "black"),axis.text=element_text(size=17,face="bold"),
+        axis.title=element_text(size=20),
+        title=element_text(size=20),
+        plot.title = element_text(hjust = 0.5),
+        axis.text.y=element_blank())
+p_bar 
+dev.off()
+
+```
+
+```{r}
+coefs <- celldmc.o$coe
+all_t <- as.data.frame(lapply(coefs, function(x) x$t))
+rownames(all_t) <- rownames(coefs$Chol)
+#FDR threshold
+fdr_threshold_Chol<- min(abs(coefs$Chol$t[sapply(coefs$Chol$adjP, function(x) {x<=0.05})]))
+fdr_threshold_Hep <- min(abs(coefs$Hep$t[sapply(coefs$Hep$adjP, function(x) {x<=0.05})]))
+
+```
+
+```{r}
+pdf("DMCTs_nt2d.pdf", width=6,height=6)
+my_palette <- colorRampPalette(colors = c("white","#F2F7FC", "#66A7D5", "#4477B9", "#2A4D9C", "#1B3189", "#0C2167"))
+smoothScatter(all_t[, "Chol"], all_t[, "Hep"]
+              , xlab = "t -stat. (CellDMC:Chol)"
+              ,colramp = my_palette
+              ,nrpoints = 500
+              ,ylab = "t -stat. (CellDMC:Hep)", 
+              xlim = c(-7,7), ylim = c(-7,7), cex = 1.5
+, transformation = function(x) x^.25,
+              main = "Hep vs Chol")
+abline(v = 0, lty = 2, col = "black")
+abline(h = 0, lty = 2, col = "black")
+abline(v = fdr_threshold_Chol, lty = 2, col = "red")
+abline(v = -fdr_threshold_Chol, lty = 2, col = "red")
+abline(h = fdr_threshold_Hep, lty = 2, col = "red")
+abline(h = -fdr_threshold_Hep, lty = 2, col = "red")
+# I have a name list of cpgs:cpg_chol and cpg_hep. Marking these points in the plot
+points(all_t[cpg_chol, "Chol"], all_t[cpg_chol, "Hep"], col = "red", pch = 16, cex = 0.8)
+points(all_t[cpg_hep, "Chol"], all_t[cpg_hep, "Hep"], col = "#13ae38",pch = 16, cex = 0.8)
+dev.off()
+
+```
+
+```{r}
+library(gridGraphics)
+p_li <- function(){
+  par(
+    mar= c(4,4,2.5,2),
+    cex.lab = 1.5, cex.axis = 1.5, cex.main = 1.5
+  )
+  my_palette <- colorRampPalette(colors = c("white","#F2F7FC", "#66A7D5", "#4477B9", "#2A4D9C", "#1B3189", "#0C2167"))
+  smoothScatter(all_t[, "Chol"], all_t[, "Hep"]
+              , xlab = ""
+              ,colramp = my_palette
+              ,nrpoints = 500
+              ,ylab = "", 
+              xlim = c(-7,7), ylim = c(-7,7), cex = 1.5
+, transformation = function(x) x^.25,main = "")
+abline(v = 0, lty = 2, col = "black")
+abline(h = 0, lty = 2, col = "black")
+abline(v = fdr_threshold_Chol, lty = 2, col = "red")
+abline(v = -fdr_threshold_Chol, lty = 2, col = "red")
+abline(h = fdr_threshold_Hep, lty = 2, col = "red")
+abline(h = -fdr_threshold_Hep, lty = 2, col = "red")
+title(ylab="t -stat. (CellDMC:Hep)", mgp=c(2.4,1,0), cex.lab=1.5)
+title(xlab="t -stat. (CellDMC:Chol)", mgp=c(2.4,1,0), cex.lab=1.5)
+title(main="Cell type specific age DMCs", mgp=c(2.4,1,0), cex.lab=1.5)
+}
+ggdraw(p_li)
+  
+```
+
+5.  age residuals plot
+
+```{r}
+library(ggforce)
+beta <- he.o@m[tcg,]
+s <- cbind(he.o@s,he.o@ctf.o[[1]])
+fit <- lm(beta~Chol + EC + Hep + Kup + Lym + sex + t2d, data = s)
+residual <- fit$residuals
+f_hep <- s$Hep
+# Build an age group variable
+ageORD.v <- rep(0, length(s$age))
+ageORD.v[s$age <= 40] <- 0
+ageORD.v[s$age > 40 & s$age <= 60] <- 1
+ageORD.v[s$age > 60] <- 2
+# plot the residual against f_hep
+pdf("residual_fhep.pdf", width=6,height=6)
+require(ggplot2)
+ggplot(data.frame(residual, f_hep, ageORD.v), aes(x = f_hep, y = residual, color = factor(ageORD.v))) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(x = "Fraction: Hep", y = "Residuals") +
+  # add a legend without title: young, middle, old;using colors from darkblue to lightblue
+  scale_color_manual(values = c( "lightblue","darkblue", "blue"), labels = c("Young < 40", "Middle", "old > 60"), name = "") +
+  # remove the grid line
+  theme(legend.title=element_blank())+
+  # white background
+  theme(panel.background = element_rect(fill = "white", colour = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  ggtitle("Top hypomethylated hepatocyte age-DMC: cg09204942")+
+  # put the legend on the top left corner in the plot
+  theme(legend.position = c(0.2, 0.9))
+dev.off()
+
+```
+
+ctf boxplot
+
+```{r}
+library(ggplot2)
+m <- he.o@ctf.o[[1]] #cell type fraction matrix: row:samples col:cell types
+# gather
+require(tidyr)
+m_long <- gather(m, key = "Cell_Type", value = "fraction")
+pdf("ctf_box.pdf",width = 6,height = 6)
+p_box <- ggplot(m_long, aes(x = Cell_Type, y = fraction)) +
+   geom_point(aes(color = factor(Cell_Type)), position = position_jitter(width = 0.2)) +geom_boxplot(aes(color = factor(Cell_Type)),alpha = 0.5,size = 0.2)+
+  labs(x = "Cell Types", y = "Fraction") +
+  theme(legend.title=element_blank())+
+  # white background
+  theme(panel.background = element_rect(fill = "white", colour = "black"),
+        panel.grid.major = element_line(colour = "grey", linetype = "dashed"),
+        panel.grid.minor = element_blank(),
+        legend.position = "none",
+        axis.text=element_text(size=17,face="bold"),
+        axis.title=element_text(size=20),
+        title=element_text(size=20),
+        plot.title = element_text(hjust = 0.5))+
+ ggtitle("EpiScore: Cell type fraction")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+p_box
+dev.off()
+```
+
+```{r combine plots}
+library(cowplot)
+p_2 <- plot_grid(p_box,p_bar,p_li,p_re,ncol = 4,labels = c('a)', 'b)',"c)","d)"),rel_heights = c(1,1,1,1),rel_widths = c(1,1.1,0.9,1.1),align = "h",axis = "b",label_size = 12)
+pdf("test.pdf",height = 5,width = 25)
+p_2
+dev.off()
+```

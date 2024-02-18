@@ -1,0 +1,150 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(include = FALSE)
+knitr::opts_knit$set(root.dir = "/mnt/local-disk/data/guoxiaolong/Renv/lung_EpiSCORE/")
+```
+
+```{r functions and packages}
+#load("~/data/SCRNA/Tabula_Muris_Senis/lung10Xtms.Rd")
+load("~/data/SCRNA/Tabula_Muris_Senis/lungsms.Rdata")
+load("~/data/SCRNA/lung10x/lung_seuobj.Rdata")
+load("~/Renv/lung_EpiSCORE/Data/dbENCODE.Rd")
+source("~/code/Dmathy/code/ref_functions.R")
+source("R/impute.R")
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(Matrix)
+library(data.table)
+library(parallel)
+library(EpiSCORE)
+library(EpiDISH)
+```
+# integration
+```{r}
+nodata_new <- GetAssayData(seu.obj, assay = "RNA", slot = "data")
+ct_new <- as.character(Idents(seu.obj))
+shared <- intersect(rownames(nodata_new),rownames(lung10Xdor.m))
+# integrate
+idx_tms <- which(ctLungDor.v %in% c("Vein","Alveolar Macrophage","B","Cd4+ T","Cd8+ T","Classical Monocyte","Natural Killer","Neutrophil","Zbtb32+ B","Intermediate Monocyte","Nonclassical Monocyte","Interstitial Macrophage"))
+idx_new <- which(ct_new %in% c("Lymphocyte","Lipid-associated macrophage","Pan-macrophage","Endothelial","Proliferative Endothelial"))
+ct_all <- c(ct_new[-idx_new],ctLungDor.v[idx_tms])
+m_int <- cbind(nodata_new[shared,-idx_new],lung10Xdor.m[shared,idx_tms])
+metadata_df <- data.frame(cell_type = ct_all, row.names = colnames(m_int))
+sobj_all <- CreateSeuratObject(counts = m_int, meta.data = metadata_df)
+sobj_all <- FindVariableFeatures(sobj_all, selection.method = "vst", nfeatures = 2000)
+sobj_all <- ScaleData(sobj_all, features = rownames(m_int))
+sobj_all <- RunPCA(sobj_all, features = VariableFeatures(object = sobj_all))
+ElbowPlot(sobj_all)
+sobj_all <- FindNeighbors(sobj_all, dims = 1:15)
+sobj_all <- FindClusters(sobj_all, resolution = 0.5)
+set.seed(1234)
+sobj_all <- RunUMAP(sobj_all, dims = 1:15)
+#save(sobj_all,file = "seu.Rdata")
+```
+
+```{r}
+library(ggplot2)
+umap_data <- FetchData(sobj_all, vars = c("UMAP_1", "UMAP_2", "cell_type"))
+umap_centers <- aggregate(. ~ cell_type, data = umap_data, FUN = mean)
+p <- DimPlot(sobj_all, reduction = "umap", group.by = "cell_type") + theme_minimal()
+p <- p + geom_text(data = umap_centers, aes(x = UMAP_1, y = UMAP_2, label = cell_type), 
+                   color="black", size=3, vjust=1.5)
+pdf("umap_legend.pdf",width = 15,height = 10)
+print(p)
+dev.off()
+```
+
+```{r CTS markers}
+ct <- gsub("Axin2\\-Palpha\\+ cell|Pdgfrapha\\+ cell|Pericyte|Matrix fibroblast","Stromal cells",ct_all) %>% gsub("Type 2 pneumocyte|Ciliated cell|Club cell|Mesothelial","Epithelial",.) %>% gsub("Alveolar Macrophage|Classical Monocyte|Interstitial Macrophage|Intermediate Monocyte|Nonclassical Monocyte|Neutrophil|Basophils","Myeloid cells",.) %>% gsub("Vein","Endothelial",.) %>% gsub("B|Cd8\\+ T|Cd4\\+ T|Natural Killer|Zbtb32\\+ B","Lymphocytes",.) %>% gsub("Lymphocytes|Myeloid cells","Immune cells",.)
+sobj_all@meta.data$ct_merge <- ct
+ctidx <- as.numeric(factor(ct))
+expref.o <- ConstExpRef(m_int,ctidx,levels(factor(ct)),markspecTH=c(3,3,3,3))
+expref_imp <- mss_overlap_imp(expref.o,topIntMReode.m)
+save(sobj_all,file = "seu.Rdata")
+pdf("heatmap_marker.pdf",width = 15, height = 20)
+DoHeatmap(sobj_all, features = rownames(expref_imp$ref$med), group.by = "ct_merge", slot = "counts")
+dev.off()
+save(expref_imp,expref.o,file = "scref_lung.Rd")
+```
+# Validation
+```{r}
+estF.m <- epidish(lung_sms,ref.m=expref_imp$ref$med,method="RPC",maxit=1000)$estF
+```
+
+
+```{r}
+pdf("scref_vali.pdf",width = 20,height = 10)
+par(mfrow = c(3,4))
+idx <- which(anno.lung$cell_ontology_class == "endothelial cell")
+boxplot(estF.m[idx,],main = "FACS: Endothelial (n = 738)")
+idx <- which(anno.lung$cell_ontology_class %in% c("type II pneumocyte"))
+boxplot(estF.m[idx,],main = "FACS: AT2 (n = 94)")
+idx <- which(anno.lung$cell_ontology_class %in% c("epithelial cell"))
+boxplot(estF.m[idx,],main = "FACS: Epithelial (n = 9)")
+idx <- which(anno.lung$cell_ontology_class %in% c("stromal cell"))
+boxplot(estF.m[idx,],main = "FACS: Stromal cell (n = 36)")
+idx <- which(anno.lung$cell_ontology_class %in% c("Clara cell"))
+boxplot(estF.m[idx,],main = "FACS: Club cell (n = 13)")
+idx <- which(anno.lung$cell_ontology_class %in% c("ciliated cell"))
+boxplot(estF.m[idx,],main = "FACS: Ciliated cell (n = 14)")
+idx <- which(anno.lung$cell_ontology_class %in% c("T cell"))
+boxplot(estF.m[idx,],main = "FACS: T cell (n = 55)")
+idx <- which(anno.lung$cell_ontology_class %in% c("B cell"))
+boxplot(estF.m[idx,],main = "FACS: B cell (n = 55)")
+idx <- which(anno.lung$cell_ontology_class %in% c("natural killer cell"))
+boxplot(estF.m[idx,],main = "FACS: NK cell (n = 36)")
+idx <- which(anno.lung$cell_ontology_class %in% c("macrophage"))
+boxplot(estF.m[idx,],main = "FACS: Macrophage (n = 69)")
+idx <- which(anno.lung$cell_ontology_class %in% c("monocyte"))
+boxplot(estF.m[idx,],main = "FACS: Monocyte (n = 65)")
+idx <- which(anno.lung$cell_ontology_class %in% c("dendritic cell"))
+boxplot(estF.m[idx,],main = "FACS: DC (n = 69)")
+dev.off()
+
+```
+
+```{r impute}
+mrefMouselung.m <- ImputeDNAmRef(expref.o$ref$med,db="ENCODE",geneID = "SYMBOL")
+pdf("weight.pdf",width = 6,height = 4)
+plot(density(mrefMouselung.m[,5]),lwd=2,xlab="Weight",main="")
+abline(v = 0.4,lwd=2,col="red")
+dev.off()
+```
+
+# Validation WGBS
+
+```{r}
+# EC
+pdf("bs_vali.pdf",width = 20,height = 5)
+par(mfrow = c(1,4))
+load("~/data/RRBS/mouse/cerebral_EC/mf_tss500_5X.Rdata")
+est.ec <- wRPC(mf_5X_500,mrefMouselung.m,useW = T,wth = 0.4,maxit=200)$estF
+boxplot(est.ec,main = "RRBS: Cerebral EC (n = 29)",ylab = "Fraction")
+# Mono_DC
+load("~/data/WGBS/Mono_DC/mf_tss500_5X.Rdata")
+est.mye <- wRPC(mf_mono5X_500,mrefMouselung.m,useW = T,wth = 0.4,maxit=200)$estF
+boxplot(est.mye,main = "WGBS: Mono+DC(n = 20)",ylab = "Fraction")
+# fib
+# load("~/data/RRBS/mouse/Fib/mf_tss500_5X.Rdata")
+# est.fib <- wRPC(mf_fib5X_500,mrefMouselung.m,useW = T,wth = 0.32,maxit=200)$estF
+# B
+load("~/data/WGBS/B_T_BLUEP/mf_tss500_5X.Rdata")
+est.lym <- wRPC(mf_BLUE5X_500,mrefMouselung.m,useW = T,wth = 0.4,maxit=200)$estF
+boxplot(est.lym[1:4,],main = "WGBS: Naive CD4T (n = 4)",ylab = "Fraction")
+boxplot(est.lym[5:8,],main = "WGBS: Resting B (n = 4)",ylab = "Fraction")
+dev.off()
+```
+
+# Validation MM285
+
+```{r}
+
+```
+
+

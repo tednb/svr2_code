@@ -1,0 +1,481 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(include = FALSE)
+knitr::opts_knit$set(root.dir = "/mnt/local-disk/data/guoxiaolong/Renv")
+```
+
+```{r package}
+load("~/data/infinium/MM285/atlas/Rdata/blood/raw_sort.Rd")
+source("~/code/Dmathy/code/Damthy.R")
+source("~/code/Dmathy/code/ref_functions.R")
+```
+
+```{r sample seclection}
+idx_ea <- grep("EasySep", raw_sort@raw.s$CellType)
+idx_mono <- which(raw_sort@raw.s$CellType == "Monocytes EasySep")
+idx <- setdiff(idx_ea,idx_mono)
+
+qc.o <- new("qc.o")
+qc.o@m <- raw_sort@raw.m[,-idx]
+pheno <- raw_sort@raw.s[-idx,]
+pheno$tissue <- pheno$CellType
+pheno$sex <- gsub("Sex: Male","1",pheno$sex)
+pheno$sex <- gsub("Sex: Female","0",pheno$sex)
+qc.o@s <- pheno
+#qc.o@pca.o <- PCA(qc.o,2)
+# # outliers
+# remove monocytes
+idx <- which(pheno$CellType == "Monocytes")
+qc.o@m <- qc.o@m[,-idx]
+qc.o@s <- qc.o@s[-idx,]
+pheno <- qc.o@s
+pheno$tissue <- factor(gsub(" EasySep","",qc.o@s$tissue))
+qc.o1 <- qc.o
+# combine MDSC
+idx_MDSC <- which(qc.o@s$tissue == "CD11b Gr1 MDSC")
+qc.o@s$tissue[idx_MDSC] <- "myeloid cells"
+qc.o@pca.o <- list()
+# combine Neutrophils with Mono
+idx_neu <- which(qc.o@s$tissue == "Neutrophils")
+qc.o@s$tissue[idx_neu] <- "myeloid cells"
+idx_mono <- which(qc.o@s$tissue == "Monocytes EasySep")
+qc.o@s$tissue[idx_mono] <- "myeloid cells"
+qc.o@s$tissue <- gsub(" EasySep","",qc.o@s$tissue)
+qc_raw <- qc.o
+#qc.o@pca.o <- PCA(qc.o,2)
+#qc.o@pca.o <- list()
+```
+
+
+```{r}
+library(broom)
+library(isva)
+m <- qc.o@m - rowMeans(qc.o@m)
+n <- EstDimRMT(m)$dim
+svd.o <- svd(m)
+v_top <- svd.o$v[,1:n] #n=4
+rownames(v_top) <- qc.o1@s$tissue
+dist_matrix <- as.dist(1 - cor(t(v_top))) #相关性距离
+#dist_matrix <- dist(v_top)
+hc <- hclust(dist_matrix, method = "complete")
+pdf("cluster.pdf",width = 6,height = 6)
+plot(hc,main = "Immune cells (n = 38)",xlab = "Correlation distance, 4 PCs")
+dev.off()
+```
+
+```{r}
+load("~/result/REFERENCES/mouse_blood_ref/mice_blood_ref.Rd")
+library(ComplexHeatmap)
+
+celltypes <- factor(gsub(" cells| Cells|CD49b | ","",qc.o@s$tissue))
+m_heat <- qc.o@m[rownames(ref_blood),]
+
+pdf("heat_hypo_all.pdf", width = 6, height = 6)
+rainbow_colors <- RColorBrewer::brewer.pal(length(levels(celltypes)), "Set1")
+color_dict <- setNames(rainbow_colors, levels(celltypes))
+col <- list(celltypes = color_dict)
+
+Heatmap(m_heat,
+        name = "beta",
+        column_title = "Hypomethylated markers: delta > 0.1",
+        use_raster = TRUE,
+        show_row_names = FALSE,
+        show_column_names = FALSE,
+        top_annotation = HeatmapAnnotation(celltypes = celltypes, col = col),
+        cluster_rows = FALSE,  # Disable row clustering
+)
+dev.off()
+
+```
+
+
+```{r look for outliers}
+celltypes <- factor(make.names(qc.o@s$tissue))
+hy_c<-dmc_look(qc.o@m,celltypes,bar = T,name = "raw")
+library(pbapply)
+
+nt <- 10000
+
+number.lv <- matrix(NA,nrow = nt,ncol = length(levels(pheno$tissue)))
+
+outs <- list()
+
+# 使用mclapply并行执行
+result <- pblapply(1:nt, cl = 100, function(seed) {
+  out <- c()
+  for (i in 1:length(levels(pheno$tissue))) {
+    idx <- which(pheno$tissue == levels(pheno$tissue)[i])
+    out[i] <- sample(idx, 1)
+  }
+  m <- qc.o@m[,-out]
+  DMC <- list()
+  for (l in 1:length(hy_c)){
+    name <- names(hy_c)[l]
+    DMC[[name]] <- by_diff_max(hy_c[[l]],m,celltypes[-out],name,THRE = 0)
+  }
+  
+  return(list(out, sapply(DMC, length)))
+})
+
+# 提取输出和数量
+outs <- lapply(result, `[[`, 1)
+number.lv <- matrix(unlist(lapply(result, `[[`, 2)), ncol = length(levels(celltypes)), byrow = TRUE)
+
+number.m <- scale(number.lv)
+
+idx <- which.max(rowMeans(number.m))
+idx_out<-outs[[idx]]
+print(idx_out)
+qc.o@m <- qc.o@m[,-idx_out]
+qc.o@s <- qc.o@s[-idx_out,]
+qc.o@pca.o <- PCA(qc.o, 2)
+```
+
+```{r verify}
+celltypes <- factor(make.names(qc.o@s$tissue))
+hy_c<-dmc_look(qc.o@m,celltypes,bar = T,name = "qc")
+# hypo
+DMC <- list()
+for (l in 1:length(hy_c)){
+  name <- names(hy_c)[l]
+  DMC[[name]] <- by_diff_max_hypo(hy_c[[l]],qc.o@m,celltypes,name,THRE = 0)
+  print(length(DMC[[name]]))
+}
+dmc_hypo <- sapply(DMC,length)
+
+##heat map
+
+# hyper
+DMC <- list()
+for (l in 1:length(hy_c)){
+  name <- names(hy_c)[l]
+  DMC[[name]] <- by_diff_max_hyper(hy_c[[l]],qc.o@m,celltypes,name,THRE = 0)
+  print(length(DMC[[name]]))
+}
+
+
+dmc_hyper <- sapply(DMC,length)
+dmc.m <- matrix(NA,ncol = 2,nrow = 5)
+colnames(dmc.m) <- c("Hypo","Hyper")
+rownames(dmc.m) <- names(dmc_hyper)
+dmc.m[,1] <- dmc_hypo
+dmc.m[,2] <- dmc_hyper
+
+dmc.m <- as.data.frame(dmc.m)
+dmc.m$celltypes <- rownames(dmc.m)
+dmc.m <- reshape2::melt(dmc.m,id.vars = "celltypes")
+# distribution of hypo and hyper
+pdf("delta_result.pdf",width = 6,height = 6)
+ggplot(dmc.m,aes(x = celltypes,y = value,fill = variable)) + 
+  geom_bar(stat = "identity",position = "dodge") + 
+  theme_bw() + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(x = "",y = "Number of DMCs",title = "Delta > 0") + 
+  scale_fill_manual(values = c("Hypo" = "blue","Hyper" = "red"))+
+  geom_text(aes(label = value),position = position_dodge(width = 0.9),vjust = -0.5)+
+  guides(fill = guide_legend(title = NULL))
+dev.off()
+```
+
+```{r build ref}
+DMC <- list()
+for (l in 1:length(hy_c)){
+  name <- names(hy_c)[l]
+  DMC[[name]] <- by_diff_max_hypo(hy_c[[l]],qc.o@m,celltypes,name,THRE = 0.1)
+  print(length(DMC[[name]]))
+}
+DMC_hypo <- lapply(DMC,function(x) x[1:min(sapply(DMC,length))])
+# hypo
+library(ComplexHeatmap)
+m_heat <- qc.o@m[as.character(unlist(DMC_hypo)),]
+
+col <-  list(celltypes = c("B.Cells" = "blue", 
+                           "CD8.T.Cells" = "red", 
+                           "CD49b.NK.Cells" = "green", 
+                           "myeloid.cells" = "yellow", 
+                           "CD4.T.Cells" = "purple"))
+pdf("markers_heat_hypo.pdf",width = 6,height = 6)
+Heatmap(m_heat,
+        name = "beta",
+        column_title = "Mouse Blood Reference",
+        use_raster = TRUE,
+        show_row_names = FALSE,
+        show_column_names = FALSE,
+        cluster_rows = FALSE,
+        top_annotation = HeatmapAnnotation(celltypes = celltypes, col = col)
+)
+dev.off()
+
+ref_blood <- gener_ref_med(DMC_hypo,qc.o@m,celltypes)
+colnames(ref_blood) <- c("B","CD4T","NK","CD8T","Myeloid","weight")
+save(ref_blood,file = "mice_blood_ref.Rd")
+```
+
+display delta
+```{r}
+pdf("onecpg_qc.pdf",width = 8,height = 8)
+plotCpg(qc.o@m, cpg=DMC_hypo$CD49b.NK.Cells[4], pheno=qc.o@s$tissue, ylab = "Beta")
+dev.off()
+pdf("onecpg_raw.pdf",width = 8,height = 8)
+plotCpg(qc_raw@m, cpg=DMC_hypo$CD49b.NK.Cells[4], pheno=qc_raw@s$tissue, ylab = "Beta")
+dev.off()
+```
+
+```{r test}
+library(gridExtra)
+m_test <- qc_raw@m[,idx_out]
+idx_mye <- which(qc_raw@s$tissue[idx_out] == "myeloid cells")
+m_test <-cbind(m_test,rowMeans(m_test[,idx_mye]))
+m_test <- m_test[,-idx_mye]
+set.seed(4567)
+sequences <- list()
+for (i in 1:100) {
+  seq <- runif(5)
+  total <- sum(seq)
+  seq_normalized <- seq / total
+  sequences[[i]] <- seq_normalized
+}
+predicted <- list()
+for (w in 1:length(sequences)){
+  testset <- m_test %*% sequences[[w]]
+  rownames(testset) <- rownames(qc.o@m)
+  predicted[[w]]<-RPC(ref_blood,testset)
+}
+cell <- as.character(colnames(predicted[[1]]))
+plots <- list()
+for (l in 1:length(predicted[[1]])){
+  pre_frac <- as.numeric(sapply(predicted,function(x) x[,l]))
+  name <- cell[l]
+  true_frac <- sapply(sequences,function(x) x[l])
+  # using ggplot2 to plot the esti frac vs true frac
+  
+  p <- ggplot(data.frame(pre_frac,true_frac),aes(x = true_frac,y = pre_frac))+
+    geom_point()+
+    geom_abline(intercept = 0,slope = 1)+
+    labs(x = "True Fraction",y = "Estimated Fraction",title = name)+
+    theme_bw()+
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank(),
+          axis.line = element_line(colour = "black"),
+          axis.text = element_text(size = 10),
+          axis.title = element_text(size = 10),
+          legend.position = "none")+
+    # 添加PCC
+    annotate("text",x = 0.1,y = 0.8,label = paste0("PCC = ",round(cor(pre_frac,true_frac),2)))+
+    # 添加RMSE
+    annotate("text",x = 0.1,y = 0.7,label = paste0("RMSE = ",round(sqrt(mean((pre_frac-true_frac)^2)),2)))+
+    # 添加P value
+    annotate("text",x = 0.1,y = 0.75,label = paste0("P = ",format(cor.test(pre_frac,true_frac)$p.value,digits=2,scientific = T)))+
+    coord_cartesian(xlim = c(0,0.8),ylim = c(0,0.8))
+  plots[[l]] <- p
+}
+pdf("self_test.pdf",width = 6,height = 9)
+grid.arrange(grobs = plots, ncol = 2)
+dev.off()
+```
+
+# Independent validation: GSE201923
+
+
+```{r}
+load("~/data/infinium/MM285/Leukocyte/raw.Rd")
+m <- raw.leu@raw.m
+```
+
+```{r}
+mars <- rownames(ref_blood)
+m_heat <- m[mars,]
+col <-  list(celltypes = c("B-cell" = "blue", 
+                           "CD8+ T-cell" = "red", 
+                           "Neutrophil" = "green", 
+                           "Monocyte" = "yellow", 
+                           "CD4+ T-cell" = "purple"))
+pdf("testset_heat.pdf",width = 6,height = 6)
+Heatmap(m_heat,
+        use_raster = TRUE,
+        show_row_names = FALSE,
+        show_column_names = FALSE,
+        top_annotation = HeatmapAnnotation(celltypes = raw_bc.o@raw.s$celltype, col = col)
+)
+dev.off()
+```
+
+```{r test}
+est.m<-as.data.frame(RPC(ref_blood,m))
+est.m$celltype <- colnames(raw.leu@raw.m)
+pdf("fraction_testset.pdf",width = 6,height = 6)
+df_long <- reshape2::melt(est.m, id.vars = "celltype", variable.name = "CellType_ref", value.name = "Percentage")
+ggplot(df_long, aes(x = celltype, y = Percentage, fill = CellType_ref)) +
+  geom_bar(stat = "identity", position = "stack") +
+  theme_minimal() +
+  labs(x = "", y = "Fraction", fill = "Estimation", title = "Purified leukocytes (n = 7)") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+dev.off()
+```
+
+For each mixture, randomly pick1 of the 3 triplicates.
+
+```{r in silico mixture}
+m <- raw.leu@raw.m
+celltype <- colnames(m)
+celltype[5:7] <- "Myeloid cell"
+celtype <- levels(factor(celltype))
+set.seed(4567)
+sequences <- list()
+for (i in 1:100) {
+  seq <- runif(5)
+  total <- sum(seq)
+  seq_normalized <- seq / total
+  sequences[[i]] <- seq_normalized
+}
+predicted <- list()
+for (w in 1:length(sequences)){
+  mix <- c()
+for (i in 1:length(celtype)) {
+  idx <- which(celltype == celtype[i])
+  if(length(idx) > 1){
+    mix[i] <- sample(idx, 1)
+  }else{
+    mix[i] <- idx
+  }
+
+}
+m_mix <- m[,mix]
+  testset <- m_mix %*% sequences[[w]]
+  rownames(testset) <- rownames(m)
+  predicted[[w]]<-RPC(ref_blood,testset)
+}
+```
+
+```{r}
+##  prediction
+library(gridExtra)
+cell <- celltype
+idx <- c(1,2,4,5,3)
+plots <- list()
+for (l in 1:length(predicted[[1]])){
+  pre_frac <- as.numeric(sapply(predicted,function(x) x[idx[l]]))
+  name <- cell[l]
+  true_frac <- sapply(sequences,function(x) x[l])
+  # using ggplot2 to plot the esti frac vs true frac
+  
+  p <- ggplot(data.frame(pre_frac,true_frac),aes(x = true_frac,y = pre_frac))+
+    geom_point()+
+    geom_abline(intercept = 0,slope = 1)+
+    labs(x = "True Fraction",y = "Estimated Fraction",title = name)+
+    theme_bw()+
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank(),
+          axis.line = element_line(colour = "black"),
+          axis.text = element_text(size = 10),
+          axis.title = element_text(size = 10),
+          legend.position = "none")+
+    # 添加PCC
+    annotate("text",x = 0.1,y = 0.8,label = paste0("PCC = ",round(cor(pre_frac,true_frac),2)))+
+    # 添加RMSE
+    annotate("text",x = 0.1,y = 0.7,label = paste0("RMSE = ",round(sqrt(mean((pre_frac-true_frac)^2)),2)))+
+    # 添加P value
+    annotate("text",x = 0.1,y = 0.75,label = paste0("P = ",format(cor.test(pre_frac,true_frac)$p.value,digits=2,scientific = T)))+
+    coord_cartesian(xlim = c(0,0.8),ylim = c(0,0.8))
+  plots[[l]] <- p
+}
+pdf("mixture_indepn_leu.pdf",width = 9,height = 6)
+grid.arrange(grobs = plots, ncol = 3)
+dev.off()
+```
+
+
+# bm validation
+```{r}
+load("~/data/infinium/MM285/bone_marrow/raw.Rd")
+m <- raw.o@raw.m[,raw.o@raw.s$celltype%in%c("CD4+ T-cell","CD8+ T-cell","B-cell","Monocyte","Neutrophil")]
+est.m<-as.data.frame(RPC(ref_blood,m)/3)
+est.m$celltype <- raw_bc.o@raw.s$celltype
+pdf("fraction_testset_bm.pdf",width = 6,height = 6)
+df_long <- reshape2::melt(est.m, id.vars = "celltype", variable.name = "CellType_ref", value.name = "Percentage")
+ggplot(df_long, aes(x = celltype, y = Percentage, fill = CellType_ref)) +
+  geom_bar(stat = "identity", position = "stack") +
+  theme_minimal() +
+  labs(x = "", y = "Fraction", fill = "Estimation", title = "Sorted immune cells in Bone Marrow (n = 15)") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+dev.off()
+#
+```
+
+
+```{r}
+celltype <- raw_bc.o@raw.s$celltype
+celltype[10:15] <- "Myeloid cell"
+celtype <- levels(factor(celltype))
+set.seed(4567)
+sequences <- list()
+for (i in 1:100) {
+  seq <- runif(4)
+  total <- sum(seq)
+  seq_normalized <- seq / total
+  sequences[[i]] <- seq_normalized
+}
+predicted <- list()
+for (w in 1:length(sequences)){
+  mix <- c()
+for (i in 1:length(celtype)) {
+  idx <- which(celltype == celtype[i])
+  if(length(idx) > 1){
+    mix[i] <- sample(idx, 1)
+  }else{
+    mix[i] <- idx
+  }
+
+}
+m_mix <- m[,mix]
+  testset <- m_mix %*% sequences[[w]]
+  rownames(testset) <- rownames(m)
+  predicted[[w]]<-RPC(ref_blood,testset)
+}
+predicted <- lapply(predicted,function(x) x[-3])
+#
+```
+
+
+```{r}
+library(gridExtra)
+cell <- celtype
+plots <- list()
+for (l in 1:length(predicted[[1]])){
+  pre_frac <- as.numeric(sapply(predicted,function(x) x[l]))
+  name <- cell[l]
+  true_frac <- sapply(sequences,function(x) x[l])
+  # using ggplot2 to plot the esti frac vs true frac
+  
+  p <- ggplot(data.frame(pre_frac,true_frac),aes(x = true_frac,y = pre_frac))+
+    geom_point()+
+    geom_abline(intercept = 0,slope = 1)+
+    labs(x = "True Fraction",y = "Estimated Fraction",title = name)+
+    theme_bw()+
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank(),
+          axis.line = element_line(colour = "black"),
+          axis.text = element_text(size = 10),
+          axis.title = element_text(size = 10),
+          legend.position = "none")+
+    # 添加PCC
+    annotate("text",x = 0.1,y = 0.8,label = paste0("PCC = ",round(cor(pre_frac,true_frac),2)))+
+    # 添加RMSE
+    annotate("text",x = 0.1,y = 0.7,label = paste0("RMSE = ",round(sqrt(mean((pre_frac-true_frac)^2)),2)))+
+    # 添加P value
+    annotate("text",x = 0.1,y = 0.75,label = paste0("P = ",format(cor.test(pre_frac,true_frac)$p.value,digits=2,scientific = T)))+
+    coord_cartesian(xlim = c(0,0.8),ylim = c(0,0.8))
+  plots[[l]] <- p
+}
+pdf("mixture_indepn_bm.pdf",width = 6,height = 6)
+grid.arrange(grobs = plots, ncol = 2)
+dev.off()
+```
+

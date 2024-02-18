@@ -1,0 +1,153 @@
+---
+title: "GSE184410"
+output:
+  pdf_document: default
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(include = FALSE)
+knitr::opts_knit$set(root.dir = "/mnt/local-disk/data/guoxiaolong/Renv")
+```
+
+probes annotation
+
+```{r}
+GPL <- fread("~/data/infinium/GPL_files/GPL30650/MM285.mm10.manifest.tsv",header = T)
+colnames(GPL)[9] <- "Name"
+colnames(GPL)[1] <- "chr"
+colnames(GPL)[28] <- "Infinium_Design_Type"
+```
+
+beta matrix
+
+```{r}
+m <- fread("~/data/infinium/MM285/GSE184410_20210916_GEO_processed_matrix.csv",header = T)
+
+```
+
+```{r}
+library("sesame")
+library(parallel)
+```
+
+```{r idat}
+idat_dir <- "~/data/infinium/MM285/bone_marrow/idat"
+# input idat
+sdfs = openSesame(idat_dir, func = NULL, BPPARAM = BiocParallel::MulticoreParam(50)) # return SigDF list
+# Default preprocessing
+sdfs = openSesame(sdfs, prep="TQC", func=NULL, BPPARAM = BiocParallel::MulticoreParam(50)) #  Set strain-specific mask (mouse)+ 	Mask probes of poor design + inferInfiniumIChannel
+# Detection P-value
+
+sdfs <- mclapply(sdfs,function(x) {pOOBAH(x,pval.threshold = 0.2)},mc.cores = 50)
+
+sum(sdfs[[10]]$mask)
+sum(is.na(getBetas(sdfs[[10]])))
+
+# betas = do.call(cbind, BiocParallel::bplapply(
+#     sdfs, function(x) {
+#       getBetas(x)
+# }, BPPARAM = BiocParallel::MulticoreParam(50)))
+# save(betas,file = "TQCP.Rd")
+# Dye Bias Correction
+sdfs <- mclapply(sdfs,function(x) {dyeBiasCorrTypeINorm(x)},mc.cores = 50)
+# Background Subtraction
+sdfs_pre <- openSesame(sdfs, prep="B", func=NULL, BPPARAM = BiocParallel::MulticoreParam(50))
+par(mfrow=c(2,1), mar=c(3,3,2,1))
+sesameQC_plotBetaByDesign(sdfs[[1]], main="Before", xlab="\beta")
+sesameQC_plotBetaByDesign(sdfs_pre[[1]], main="After", xlab="\beta")
+save(sdfs_pre,file = "preprocess.Rd")
+# Match Infinium-I/II
+par(mfrow=c(2,1), mar=c(3,3,2,1))
+sesameQC_plotBetaByDesign(sdfs_pre[[200]], main="Before", xlab="\beta")
+sesameQC_plotBetaByDesign(matchDesign(sdfs_pre[[200]]), main="After", xlab="\beta")
+
+
+
+#betas <- matrix(NA,nrow = nrow(sdfs_pre[[1]]),ncol = length(sdfs_pre))
+betas = do.call(cbind, BiocParallel::bplapply(
+    sdfs_pre, function(x) {
+      getBetas(x)
+}, BPPARAM = BiocParallel::MulticoreParam(50)))
+```
+
+```{r}
+
+source("~/code/Dmathy/code/Damthy.R")
+
+raw_nDB.o <- new("raw.o")
+raw_nDB.o@raw.m <- betas
+raw_nDB.o@raw.s <- anno
+coverage(raw_nDB.o)
+raw_nDB.o <- imp(raw_nDB.o) # 0.7 + 0.8 105*255833
+save(raw_nDB.o,file = "raw_nDB.Rd")
+```
+
+```{r}
+#gene TSS200 CpGs
+library(data.table)
+gencode <- fread("~/data/infinium/MM285/MM285.mm10.manifest.gencode.vM25.tsv",sep = "\t")
+judTSS<-function(x,gencode){
+  dist<-as.numeric(strsplit(gencode$distToTSS[x],";")[[1]])
+  if(gencode$probe_strand[x] == "+"){
+  any(dist < 0 & dist >= -200)
+} else {
+  any(dist > 0 & dist <= 200)
+}
+}
+idx <- which(unlist(mclapply(1:nrow(gencode),function(x) {judTSS(x,gencode)},mc.cores = 50)))
+gen_match <- gencode[idx,]
+# match to raw.m
+m <- raw_DB.o@raw.m
+common.c <- intersect(rownames(m),gen_match$probeID)
+idx_gen <- match(common.c,gen_match$probeID)
+gen_match <- gen_match[idx_gen,]
+idx_m <- match(common.c,rownames(m))
+m_gen <- m[idx_m,]
+identical(rownames(m_gen),gen_match$probeID)
+
+```
+
+```{r}
+gen_ma<-function(x,gencode){
+  dist<-as.numeric(strsplit(gencode$distToTSS[x],";")[[1]])
+  gene<-strsplit(gencode$geneNames[x],";")[[1]]
+  if(gencode$probe_strand[x] == "+"){
+  unique(gene[which(dist < 0 & dist >= -200)])
+} else {
+  unique(gene[which(dist > 0 & dist <= 200)])
+}
+}
+
+gen_list<-mclapply(1:nrow(gen_match),function(x) {gen_ma(x,gen_match)},mc.cores = 50)# CpG ~ gene
+
+gen_names <- unique(unlist(gen_list))
+```
+
+```{r}
+find_positions <- function(lst, target) {
+  positions <- c()  # 初始化一个空向量来存储匹配的位置
+  
+  for (i in 1:length(lst)) {
+    if (any(grepl(target,lst[[i]]))) {
+      positions <- c(positions, i)  # 将匹配的位置添加到向量中
+    }
+  }
+  
+  return(positions)  # 返回匹配的位置向量
+}
+
+genM <- function(gene,gen_list,m_gen){
+  idx<-find_positions(gen_list, gene)
+  if(length(idx) > 1){
+    Met <- colMeans(m_gen[idx,])
+  } else {
+    Met <- m_gen[idx,]
+  }
+  return(Met)
+}
+map_gene.m<-do.call(rbind,BiocParallel::bplapply(gen_names,function(x) {genM(x,gen_list,m_gen)}, BPPARAM = BiocParallel::MulticoreParam(50)))
+rownames(map_gene.m) <- gen_names
+save(map_gene.m,file = "map_DB.Rd")
+```

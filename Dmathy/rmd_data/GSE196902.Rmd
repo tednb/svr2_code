@@ -1,0 +1,66 @@
+---
+title: "GSE196902"
+output:
+  pdf_document: default
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(include = FALSE)
+knitr::opts_knit$set(root.dir = "/mnt/local-disk/data/guoxiaolong/Renv")
+```
+
+```{r}
+library("sesame")
+library(parallel)
+```
+
+```{r}
+idat_dir <- "~/data/infinium/MM285/fib+hp/IDAT"
+# input idat
+sdfs = openSesame(idat_dir, func = NULL, BPPARAM = BiocParallel::MulticoreParam(50))
+sdfs = openSesame(sdfs, prep="TQCPDB", func=NULL, BPPARAM = BiocParallel::MulticoreParam(50))
+# # Match Infinium-I/II
+# par(mfrow=c(2,1), mar=c(3,3,2,1))
+# sesameQC_plotBetaByDesign(sdfs[[2]], main="Before", xlab="\beta")
+# sesameQC_plotBetaByDesign(matchDesign(sdfs[[2]]), main="After", xlab="\beta")
+```
+
+```{r}
+betas = do.call(cbind, BiocParallel::bplapply(
+    sdfs, function(x) {
+      getBetas(x)
+}, BPPARAM = BiocParallel::MulticoreParam(50)))
+source("~/code/Dmathy/code/Damthy.R")
+library(data.table)
+pheno <- fread("~/data/infinium/MM285/fib+hp/GSE196902_series_matrix.txt")
+pheno <- t(pheno)
+pheno <- pheno[-1,]
+colnames(pheno)  <- c("tissue","type","sex","strain","sample_preservation")
+pheno <- as.data.frame(pheno)
+pheno$tissue <- gsub("tissue: ","",pheno$tissue)
+raw.o <- new("raw.o")
+raw.o@raw.m <- betas
+raw.o@raw.s <- pheno
+coverage(raw.o)
+raw.o <- imp(raw.o) #1
+save(raw.o,file = "raw.Rd")
+```
+
+```{r }
+raw_fib.o <- new("raw.o")
+idx <- which(pheno$tissue %in% c("Embryonic fibroblasts"))
+raw_fib.o@raw.m <- betas[,idx]
+raw_fib.o@raw.s <- pheno[idx,]
+save(raw_fib.o,file = "raw_fib.Rd")
+```
+
+```{r}
+raw_LSK.o <- new("raw.o")
+idx <- which(pheno$tissue %in% c("Hematopoietic precursor"))
+raw_LSK.o@raw.m <- betas[,idx]
+raw_LSK.o@raw.s <- pheno[idx,]
+save(raw_LSK.o,file = "raw_LSK.Rd")
+```
+

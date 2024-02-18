@@ -1,0 +1,373 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(include = FALSE)
+knitr::opts_knit$set(root.dir = "/mnt/local-disk/data/guoxiaolong/Renv/bm_hpei_ref/")
+```
+
+```{r package}
+#setwd("~/Renv/bm_Ref")
+load("~/data/infinium/MM285/bone_marrow/raw.Rd")
+source("~/code/Dmathy/code/Damthy.R")
+source("~/code/Dmathy/code/ref_functions.R")
+library(ComplexHeatmap)
+```
+
+# 1. Prepare
+
+```{r}
+idx <- which(raw.o@raw.s$celltype != "NA")
+qc.o <- new("qc.o")
+qc.o@m <- raw.o@raw.m[,idx]
+qc.o@s <- raw.o@raw.s[idx,]
+qc.o@s$celltype <- gsub("\\+ T-cell|-cell|cyte|trophil","",qc.o@s$celltype)
+#
+qc_raw <- qc.o
+qc.o@s$tissue <- qc.o@s$celltype
+#qc.o@pca.o <- PCA(qc.o,2)
+```
+
+# 2. unsupervised cluster
+
+```{r}
+library(broom)
+library(isva)
+m <- qc.o@m - rowMeans(qc.o@m)
+n <- EstDimRMT(m)$dim
+svd.o <- svd(m)
+v_top <- svd.o$v[,1:n] #n=4
+rownames(v_top) <- qc.o@s$celltype
+#dist_matrix <- as.dist(1 - cor(t(v_top))) #相关性距离
+dist_matrix <- dist(v_top)
+hc <- hclust(dist_matrix, method = "complete")
+pdf("cluster.pdf",width = 6,height = 6)
+plot(hc,main = "Bone marrow cells (n = 27)",xlab = "Euclidean distance, 4 PCs")
+dev.off()
+```
+
+```{r}
+hy_c<-dmc_look(qc.o@m,factor(qc.o@s$tissue),bar = T,name = "raw")
+qc.o@s$tissue <- gsub("CMP|GMP","CGP",qc.o@s$tissue)
+ct_raw <- factor(qc.o@s$tissue)
+poDMC<-find_markers(qc.o@m,ct_raw,THRE=0,class = "hypo",name = "all",draw = 0)
+perDMC<-find_markers(qc.o@m,ct_raw,THRE=0,class = "hyper",name = "all",draw = 0)
+```
+
+# 3. ref1: total
+
+```{r}
+# ref1
+qc.o@s$tissue <- gsub("CGP|LSK","LC",qc.o@s$tissue)
+qc.o@s$tissue <- gsub("Mono|Neu","MN",qc.o@s$tissue)
+qc.o@s$tissue <- gsub("CD8|CD4","T",qc.o@s$tissue)
+celltypes <- factor(qc.o@s$tissue)
+DMC_all<-find_markers(qc.o@m,celltypes,THRE=0.4,class = "hypo",name = "TOTAL")
+DMC_hyper<-find_markers(qc.o@m,celltypes,THRE=0.1,class = "hyper",name = "TOTAL",draw = 0)
+
+DMC_all$LC <- DMC_hyper$LC[1:36]
+
+  m_heat <- qc.o@m[as.character(unlist(DMC_all)),]
+  pdf("main_heat.pdf",width = 6,height = 6)
+  rainbow_colors <- rainbow(length(levels(celltypes)))
+  color_dict <- setNames(rainbow_colors, levels(celltypes))
+  col <-  list(celltypes = color_dict)
+  split_vector <- unlist(lapply(DMC_all, function(group) rep(names(DMC_all)[which(lapply(DMC_all, function(x) all(x %in% group)) == TRUE)],  length(group))))
+  p <- Heatmap(m_heat,
+          name = "beta",
+          column_title = "Reference of layer 1",
+          use_raster = TRUE,
+          show_row_names = FALSE,
+          show_column_names = FALSE,
+          top_annotation = HeatmapAnnotation(celltypes = celltypes, col = col),
+          row_split = split_vector
+  )
+  print(p)
+  dev.off()
+
+bmref_main <- gener_ref_med(DMC_all,qc.o@m,celltypes)
+```
+
+# 4. ref2.1: LC
+
+```{r}
+idx <- which(qc.o@s$tissue == "LC")
+m_lc <- qc.o@m[,idx]
+s_lc <- factor(ct_raw[idx])
+celltypes <- factor(s_lc)
+markers_overview(qc.o@m[perDMC$LSK[1:66],],ct_raw,name = "hyperLSK")
+DMC_lc <- list(LSK=perDMC$LSK[1:66]) 
+bmref_lc <- gener_ref_med(DMC_lc,m_lc,s_lc)
+```
+
+# 5. ref2.2: MN 0.4
+
+```{r}
+idx <- which(qc.o@s$tissue == "MN")
+m_mn <- qc.o@m[,idx]
+s_mn <- factor(ct_raw[idx])
+celltypes <- factor(s_mn)
+markers_overview(qc.o@m[poDMC$Mono[1:88],],qc.o@s$celltype,name = "hypoMono")
+markers_overview(qc.o@m[poDMC$Neu[1:88],],qc.o@s$celltype,name = "hypoNeu")
+DMC_mn <- list(Mono=poDMC$Mono[1:88], Neu=poDMC$Neu[1:88])
+bmref_mn <- gener_ref_med(DMC_mn,m_mn,s_mn)
+```
+# 6. ref2.3 T 0.3
+
+```{r}
+idx <- which(qc.o@s$tissue == "T")
+m_t <- qc.o@m[,idx]
+s_t <- factor(ct_raw[idx])
+celltypes <- factor(s_t)
+markers_overview(qc.o@m[poDMC$CD4[1:39],],qc.o@s$celltype,name = "hypoCD4")
+markers_overview(qc.o@m[poDMC$CD8[1:39],],qc.o@s$celltype,name = "hypoCD8")
+DMC_t <-list(CD4=poDMC$CD4[1:39], CD8=poDMC$CD8[1:39])
+bmref_t <- gener_ref_med(DMC_t,m_t,s_t)
+```
+
+```{r}
+layer2_marks <- list(DMC_lc$LSK,DMC_mn$Mono,DMC_mn$Neu,DMC_t$CD4,DMC_t$CD8)
+names(layer2_marks) <- c("LSK","Mono","Neu","CD4T","CD8T")
+m_heat <- qc.o@m[as.character(unlist(layer2_marks)),]
+celltypes <- factor(qc.o@s$tissue)
+desired_order <- c("LSK", "CGP", "CD4", "CD8", "Mono", 
+                   "Neu","MEP","B")
+order_vector <- match(celltypes, desired_order)
+m_heat_sorted <- m_heat[, order(order_vector)]
+sorted_celltypes <- celltypes[order(order_vector)]
+ct_cols <- c(rep("LC",9),rep("T",6),rep("MN",6),rep("MEP",3),rep("B",3))
+pdf("layer2_heat.pdf",width = 6,height = 6)
+  rainbow_colors <- rainbow(length(levels(sorted_celltypes)))
+  color_dict <- setNames(rainbow_colors, levels(sorted_celltypes))
+  col <-  list(sorted_celltypes = color_dict)
+  split_vector <- unlist(lapply(layer2_marks, function(group) rep(names(layer2_marks)[which(lapply(layer2_marks, function(x) all(x %in% group)) == TRUE)],  length(group))))
+  p <- Heatmap(m_heat_sorted,
+          name = "beta",
+          column_title = "Reference of layer 2",
+          use_raster = TRUE,
+          cluster_columns = FALSE,
+          show_row_names = FALSE,
+          show_column_names = FALSE,
+          top_annotation = HeatmapAnnotation(celltypes = sorted_celltypes, col = col),
+          row_split = split_vector,
+          column_split = ct_cols
+  )
+  print(p)
+  dev.off()
+
+
+```
+
+
+# 6. validation1
+
+```{r}
+setwd("~/Renv/bm_Ref")
+set.seed(4567)
+sequences <- list()
+for (i in 1:100) {
+  seq <- runif(8)
+  total <- sum(seq)
+  seq_normalized <- seq / total
+  sequences[[i]] <- seq_normalized
+}
+
+m <- qc.o@m
+ct <- factor(ct_raw)
+# m <- qc.o@m
+# ct <- factor(qc.o@s$tissue)
+
+predicted <- list()
+for (w in 1:length(sequences)){
+  mix <- c()
+for (i in 1:length(levels(ct))) {
+  idx <- which(ct == levels(ct)[i])
+  mix[i] <- sample(idx, 1)
+}
+m_mix <- m[,mix]
+  testset <- m_mix %*% sequences[[w]]
+  rownames(testset) <- rownames(m)
+  predicted[[w]]<-bmRPC(bmref_main,bmref_lc,bmref_mn,bmref_t,testset)
+  #predicted[[w]]<-RPC(bmref_main,testset)
+}
+```
+
+```{r}
+cell <- colnames(predicted[[1]])
+idx_cell <- match(cell,levels(ct))
+plots <- list()
+library(gridExtra)
+for (l in 1:length(predicted[[1]])){
+  pre_frac <- as.numeric(sapply(predicted,function(x) x[,l]))
+  name <- cell[l]
+  true_frac <- sapply(sequences,function(x) x[idx_cell[l]])
+  # using ggplot2 to plot the esti frac vs true frac
+  
+  p <- ggplot(data.frame(pre_frac,true_frac),aes(x = true_frac,y = pre_frac))+
+    geom_point()+
+    geom_abline(intercept = 0,slope = 1)+
+    labs(x = "True Fraction",y = "Estimated Fraction",title = name)+
+    theme_bw()+
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank(),
+          axis.line = element_line(colour = "black"),
+          axis.text = element_text(size = 10),
+          axis.title = element_text(size = 10),
+          legend.position = "none")+
+    # 添加PCC
+    annotate("text",x = 0.1,y = 0.5,label = paste0("PCC = ",round(cor(pre_frac,true_frac),2)))+
+    # 添加RMSE
+    annotate("text",x = 0.1,y = 0.4,label = paste0("RMSE = ",round(sqrt(mean((pre_frac-true_frac)^2)),2)))+
+    # 添加P value
+    annotate("text",x = 0.1,y = 0.45,label = paste0("P = ",format(cor.test(pre_frac,true_frac)$p.value,digits=2,scientific = T)))+
+    coord_cartesian(xlim = c(0,0.5),ylim = c(0,0.5))
+  plots[[l]] <- p
+}
+
+pdf("mixture_self.pdf",width = 12,height = 6)
+grid.arrange(grobs = plots, ncol = 4)
+dev.off()
+```
+
+Validaiton 2
+
+```{r test set}
+
+load("~/data/infinium/MM285/atlas/Rdata/blood/raw_sort.Rd")
+# idx <- which(raw_sort@raw.s$CellType %in% c("B Cells","CD4 T Cells EasySep","CD8 T Cells","Monocytes EasySep","Neutrophils","B Cells EasySep","CD49b NK Cells","CD4 T Cells","CD8 T Cells EasySep","Monocytes","CD11b Gr1 MDSC"))
+idx <- which(raw_sort@raw.s$CellType %in% c("CD8 T Cells","Monocytes EasySep","B Cells EasySep","CD4 T Cells"))
+m <- raw_sort@raw.m[,idx]
+ct <- factor(raw_sort@raw.s$CellType[idx])
+```
+
+```{r test}
+est.m<-bmRPC(bmref_main,bmref_lc,bmref_mn,bmref_t,m)
+#est.m<-RPC(ref_bm_merge,m)
+pdf("fraction_test.pdf",width = 14,height = 8)
+par(mfrow = c(3,4),las = 2)
+for(i in 1:length(levels(ct))){
+  idx <- which(ct == levels(ct)[i])
+  boxplot(est.m[idx,],xlab = "",ylab = "Fraction",main = levels(ct)[i])
+}
+dev.off()
+
+```
+
+Validation 3
+
+```{r}
+library(gridExtra)
+idx <- which(raw_sort@raw.s$CellType %in% c("B Cells EasySep","CD4 T Cells","CD8 T Cells","Monocytes EasySep"))
+m <- raw_sort@raw.m[,idx]
+ct <- factor(raw_sort@raw.s$CellType[idx])
+set.seed(4567)
+sequences <- list()
+for (i in 1:100) {
+  seq <- runif(4)
+  total <- sum(seq)
+  seq_normalized <- seq / total
+  sequences[[i]] <- seq_normalized
+}
+predicted <- list()
+for (w in 1:length(sequences)){
+  mix <- c()
+for (i in 1:length(levels(ct))) {
+  idx <- which(ct == levels(ct)[i])
+  mix[i] <- sample(idx, 1)
+}
+m_mix <- m[,mix]
+  testset <- m_mix %*% sequences[[w]]
+  rownames(testset) <- rownames(m)
+  predicted[[w]]<-bmRPC(bmref_main,bmref_lc,bmref_mn,bmref_t,testset)
+}
+predicted <- lapply(predicted, function(x) x[c(1,6,5,8)])
+cell <- c("B", "CD4T", "CD8T", "Monocyte")
+
+
+plots <- list()
+
+for (l in 1:length(predicted[[1]])){
+  pre_frac <- as.numeric(sapply(predicted,function(x) x[l]))
+  name <- cell[l]
+  true_frac <- sapply(sequences,function(x) x[l])
+  # using ggplot2 to plot the esti frac vs true frac
+  
+  p <- ggplot(data.frame(pre_frac,true_frac),aes(x = true_frac,y = pre_frac))+
+    geom_point()+
+    geom_abline(intercept = 0,slope = 1)+
+    labs(x = "True Fraction",y = "Estimated Fraction",title = name)+
+    theme_bw()+
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank(),
+          axis.line = element_line(colour = "black"),
+          axis.text = element_text(size = 10),
+          axis.title = element_text(size = 10),
+          legend.position = "none")+
+    # 添加PCC
+    annotate("text",x = 0.1,y = 0.7,label = paste0("PCC = ",round(cor(pre_frac,true_frac),2)))+
+    # 添加RMSE
+    annotate("text",x = 0.1,y = 0.6,label = paste0("RMSE = ",round(sqrt(mean((pre_frac-true_frac)^2)),2)))+
+    # 添加P value
+    annotate("text",x = 0.1,y = 0.65,label = paste0("P = ",format(cor.test(pre_frac,true_frac)$p.value,digits=2,scientific = T)))+
+    coord_cartesian(xlim = c(0,0.7),ylim = c(0,0.7))
+  plots[[l]] <- p
+}
+
+pdf("mixture_indepn.pdf",width = 12,height = 3)
+grid.arrange(grobs = plots, ncol = 4)
+dev.off()
+```
+
+Validation of progenitor
+
+```{r}
+load("~/result/REFERENCES/refMouse_BM+Blood.Rd")
+load("~/data/infinium/MM285/fib+hp/raw_LSK.Rd")
+est.m <- hepidish_bm(raw_LSK.o@raw.m,refMouseBoneM.list)
+pdf("fraction_progenitor.pdf",width = 10,height = 4)
+  boxplot(est.m,xlab = "",ylab = "Fraction",main = "Hematopoietic precursor")
+dev.off()
+
+
+```
+Validation 4
+```{r}
+load("~/data/infinium/MM285/Leukocyte/raw.Rd")
+m <- raw.leu@raw.m[,-c(4,7)]
+est.m<-as.data.frame(bmRPC(bmref_main,bmref_lc,bmref_mn,bmref_t,m))
+est.m$celltype <- colnames(m)
+pdf("fraction_testset_leu.pdf",width = 6,height = 6)
+df_long <- reshape2::melt(est.m, id.vars = "celltype", variable.name = "CellType_ref", value.name = "Percentage")
+ggplot(df_long, aes(x = celltype, y = Percentage, fill = CellType_ref)) +
+  geom_bar(stat = "identity", position = "stack") +
+  theme_minimal() +
+  labs(x = "", y = "Fraction", fill = "Estimation", title = "Purified leukocytes (n = 5)") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+dev.off()
+
+```
+
+```{r}
+#load("Markers.Rd")
+m_heat <- m[DMC_mn$Mono,]
+col <-  list(celltypes = c("B cells" = "blue", 
+                           "Cd8+ T cells" = "red", 
+                           "Neutrophil" = "green", 
+                           "Macrophage" = "yellow", 
+                           "Cd4+ T cells" = "purple"))
+pdf("testset_heat.pdf",width = 6,height = 6)
+Heatmap(m_heat,
+        use_raster = TRUE,
+        show_row_names = FALSE,
+        show_column_names = FALSE,
+        top_annotation = HeatmapAnnotation(celltypes = colnames(m), col = col)
+)
+dev.off()
+```
+
+
