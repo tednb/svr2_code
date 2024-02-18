@@ -1,0 +1,167 @@
+---
+title: "Scage plus"
+output:
+  pdf_document: default
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(include = FALSE)
+knitr::opts_knit$set(root.dir = "/mnt/local-disk/data/guoxiaolong/Renv")
+```
+
+```{r}
+library(stringr)
+library(matrixStats)
+source("~/code/Dmathy/Damthy.R")
+load("~/data/infinium/liver_sample/341_liver_samples/RData/GSE180474_he.Rd")
+source("~/code/base/CellDMC.R")
+source("~/code/base/ScAge/scAge.R")
+load("~/data/infinium/liver_sample/40_normal_liver_samples/GSE107038_qc.Rd")
+load("~/data/infinium/liver_sample/AA_hepatocytes/GSE123995_qc.Rd")
+```
+
+```{r celldmc}
+
+covs <- model.matrix(~ sex + t2d, data = he.o@s)
+celldmc.o <- CellDMC(he.o@m, he.o@s$age,he.o@ctf.o[[1]],
+                       cov.mod = covs, 
+                       adjPMethod = "fdr",
+                       adjPThresh = 0.05,
+                       sort = FALSE,
+                       mc.cores = 50)
+dmct <- celldmc.o$dmct
+coefs <- celldmc.o$coe
+models <- celldmc.o$equ
+coef.est <- mclapply(models,function(x) x$coefficients[, 1],mc.cores = 50)
+names(coef.est) <- rownames(dmct)
+save(coefs,coef.est,dmct,file= "celldmc_Re.Rd")
+
+```
+
+```{r formula and reference matrix}
+load("~/result/scage++/celldmc_Re.Rd")
+names(coef.est) <- rownames(dmct)
+idx_chol<-match(rownames(dmct)[dmct[,2]!=0],rownames(he.o@m))
+idx_hep<-match(rownames(dmct)[dmct[,4]!=0],rownames(he.o@m))
+coef_hep <- coef.est[idx_hep]
+coef_chol <- coef.est[idx_chol]
+
+chol.m <- he.o@m[idx_chol,]
+hep.m <- he.o@m[idx_hep,]
+
+```
+
+```{r prediction set}
+
+hep_p.m <- qc_107038.o@m[na.omit(match(rownames(hep.m),rownames(qc_107038.o@m))),]
+chol_p.m <- qc_107038.o@m[na.omit(match(rownames(chol.m),rownames(qc_107038.o@m))),]
+
+```
+
+```{r TCA}
+union.m <- unique(rbind(hep_p.m,chol_p.m))
+ctf <- qc_107038.o@ctf.o[[1]]
+# TCA decompsition
+library(TCA)
+tca.o <- tca(X=union.m, W=ctf, C1 = NULL
+             , C2 = NULL, refit_W = FALSE
+             , refit_W.features = NULL, refit_W.sparsity = 100
+             ,  refit_W.sd_threshold = 0.02, parallel = TRUE
+             , num_cores = 5,  max_iters = 10, log_file = "TCA.log", debug = FALSE)
+postmuTCA.lm <- tensor(X = union.m, tca.mdl = tca.o, parallel = TRUE, num_cores = 30)
+hep.t <- postmuTCA.lm[[3]][rownames(hep_p.m),]
+chol.t <- postmuTCA.lm[[1]][rownames(chol_p.m),]
+# check quality
+plot(density(hep.t[,1]))
+plot(density(chol.t[,1]))
+
+```
+
+```{r parameters}
+
+schep.lv <- bt(hep_p.m)
+scchol.lv <- bt(chol_p.m)
+# effect size
+hep.c <- lapply(schep.lv, function(cell) {
+  c <- coefs$Hep$Estimate[match(names(cell), rownames(coefs$Hep))]
+  names(c) <- names(cell)
+  return(c)
+})
+
+chol.c <- lapply(scchol.lv, function(cell) {
+  c <- coefs$Chol$Estimate[match(names(cell), rownames(coefs$Chol))]
+  names(c) <- names(cell)
+  return(c)
+})
+# adjp
+hep.p <- lapply(schep.lv, function(cell) {
+  c <- coefs$Hep$adjP[match(names(cell), rownames(coefs$Hep))]
+  names(c) <- names(cell)
+  return(c)
+})
+
+chol.p <- lapply(scchol.lv, function(cell) {
+  c <- coefs$Chol$adjP[match(names(cell), rownames(coefs$Chol))]
+  names(c) <- names(cell)
+  return(c)
+})
+# formulas
+hep.e <- lapply(schep.lv, function(cell) {
+  e <- coef.est[match(names(cell), names(coef.est))]
+  names(e) <- names(cell)
+  return(e)
+})
+chol.e <- lapply(scchol.lv, function(cell) {
+  e <- coef.est[match(names(cell), names(coef.est))]
+  names(e) <- names(cell)
+  return(e)
+})
+```
+
+```{r bulk parameters}
+# effect size
+hep_efs <- coefs$Hep$Estimate[match(rownames(hep_p.m), rownames(coefs$Hep))]
+# adjp
+hep_p <-coefs$Hep$adjP[match(rownames(hep_p.m), rownames(coefs$Hep))]
+# formulas
+hep_e <- coef.est[match(rownames(hep_p.m), names(coef.est))]
+```
+
+```{r scage}
+ages <- list()
+frac <- qc_107038.o@ctf.o[[1]]
+for(i in 1:length(schep.lv)){
+age_pre<-compute_probabilities(cell=schep.lv[[i]],
+                      cell.e=hep.e[[i]],
+                      cell.c=hep.c[[i]],
+                      frac.c=frac[i,],
+                      covs=c(0,0),
+                      # selection_mode = "percentile",
+                      # CpG_parameter=0.9,
+                      selection_mode = "numCpGs",
+                      CpG_parameter = 300)
+print(age_pre)
+ages <- append(ages,age_pre)
+}
+ages <- unlist(ages)
+plot(qc_107038.o@s$age,ages)
+cor(qc_107038.o@s$age,ages)
+cor.test(qc_107038.o@s$age,ages)$p.value
+```
+
+```{r bulk scage}
+frac <- qc_107038.o@ctf.o[[1]]
+covs <- matrix(data = 0, nrow = 2,ncol = ncol(hep_p.m))
+age.lv<-compute_probabilities_bulk(m_obe=hep_p.m,
+                      m.e=hep_e,
+                      m.c=hep_efs,
+                      frac.c=frac,
+                      covs=covs,
+                      # selection_mode = "percentile",
+                      # CpG_parameter=0.8
+                      selection_mode = "numCpGs",
+                      CpG_parameter = 100
+                      )
+```
